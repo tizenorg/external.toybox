@@ -81,9 +81,9 @@ install -m 755 toybox-dynamic $RPM_BUILD_ROOT/bin/toybox
 # debian/toybox.links
 pushd %{buildroot}
 mkdir -p usr/bin usr/sbin sbin
-#cd bin
-#for f in `cat %SOURCE2` ; do ln -s toybox $f ; done
-cd sbin
+cd bin
+for f in `cat %SOURCE2` ; do ln -s toybox $f ; done
+cd ../sbin
 for f in `cat %SOURCE3` ; do ln -s ../bin/toybox $f ; done
 cd ../usr/bin
 for f in `cat %SOURCE4` ; do ln -s ../../bin/toybox $f ; done
@@ -112,8 +112,8 @@ cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpd
 %doc LICENSE
 %{_datadir}/license/toybox
 /bin/toybox
-#/bin/mount
-#/bin/umount
+/bin/mount
+/bin/umount
 %manifest toybox.manifest
 
 %files symlinks-klogd
@@ -144,4 +144,3 @@ cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpd
 %{_bindir}/dumpleases
 %{_sbindir}/udhcpd
 %manifest toybox.manifest
-

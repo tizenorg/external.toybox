@@ -43,7 +43,13 @@ config UDHCPC
       USR2  Release current lease
 
 */
-
+/***************************************************
+ * Changes Hostory
+ * [OSETOYBOX-37] - Ashwini Kumar 2014.05.19
+ *    Function dhcpc_parseoptions(), continued to parse options,
+ *    after the 'pad' option without checking for the 'end' option.
+ *    which was causing a segfault later.
+ ***************************************************/
 #define FOR_udhcpc
 #include "toys.h"
 #include <linux/filter.h> //FIXME: linux specific. fix for other OS ports
@@ -1202,7 +1208,10 @@ static uint8_t dhcpc_parseoptions(dhcpc_result_t *presult, uint8_t *optptr)
   }
 
   while (*optptr != DHCP_OPTION_END) {
-    while (*optptr == DHCP_OPTION_PADDING) optptr++;
+    if (*optptr == DHCP_OPTION_PADDING) {
+      optptr++;
+      continue;
+    }
     if (*optptr == DHCP_OPTION_OVERLOAD) {
       overloaded = optptr[2];
       optptr += optptr[1] + 2;
