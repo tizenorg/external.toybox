@@ -1,0 +1,14 @@
+<manifest>
+	<define>
+		<domain name="syslogd"/>
+		<permit>
+		        <smack permit="_" type="w"/>
+		</permit>
+	</define>
+        <request>
+                <domain name="_"/>
+        </request>
+        <assign>
+		<filesystem path="/sbin/syslogd" exec_label="syslogd" />
+        </assign>
+</manifest>

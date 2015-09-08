@@ -1,0 +1,16 @@
+[Unit]
+Description=Run syslog
+DefaultDependencies=no
+After=syslogd.service
+ConditionKernelCommandLine=|!sec_debug.enable=0
+ConditionKernelCommandLine=|!sec_debug.enable_user=0
+
+[Service]
+Type=forking
+ExecStart=/sbin/klogd
+OOMScoreAdjust=-1000
+Restart=always
+RestartSec=0
+
+[Install]
+WantedBy=basic.target

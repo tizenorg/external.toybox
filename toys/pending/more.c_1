@@ -1,0 +1,1023 @@
+/* vi: set sw=4 ts=4:
+ *
+ * more.c - A more command implementation for toybox/busybox_replacement project.
+ *
+ * Copyright 2012 Vikash Kumar <k.vikash@samsung.com>
+ *
+ *
+
+USE_MORE(NEWTOY(more, "p:l#n#sfd", TOYFLAG_USR|TOYFLAG_BIN))
+
+config MORE
+  bool "more"
+  default n
+  help
+
+    usage: more [-dfs] [-n number] [-l num] [-p string] [file...]
+
+    A more command implementation for toybox/busybox_replacement project.
+
+    options:
+
+  	-d:Prompt the user with the message "[Press <space> to continue, 'q' to quit/]" and will display "[Press 'h' for help instruction.]" when an illegal key is pressed.
+
+  	-f:Do not scroll. Instead, it will clear the whole screen and then display the text.
+
+  	-s:squeeze multiple blank lines into single line.
+
+  	-n number:will set the screen size(in lines).
+
+  	-l num:will start displaying the text at line number 'num'.
+
+  	-p string:will search the string and then display the text at line containing that string.
+
+*/
+
+#define FOR_more
+
+#include "toys.h"
+
+#include <termios.h>
+#include <signal.h>
+
+GLOBALS(
+
+  long n_number;
+  long l_number;
+  char *p_string;
+
+  char *filename;
+  int file_count;
+  int file_flag;
+  int loop_exit;
+  int vi_flag;
+  int skip_flag;
+  int tty_fileno;
+  struct termios term;
+  struct termios buff;
+)
+
+
+void signal_handler(int signum)
+{
+  if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  	perror("TCSETATTR error: ");
+  printf("\033[2K\r");
+  exit(signum);
+}
+
+void get_screen_size(int *rw, int *colm)
+{
+  struct winsize win;
+  char *crw, *ccolm;
+  
+  if(ioctl(TT.tty_fileno, TIOCGWINSZ, &win) < 0)
+  {
+  	if((crw=getenv("LINES")) != NULL && (ccolm=getenv("COLUMNS")) != NULL)
+  	{
+  		*rw=atoi(crw);
+  		*colm=atoi(ccolm);
+  	}
+  }
+  else
+  {
+  	*rw=win.ws_row;
+  	*colm=win.ws_col;
+  }
+}
+
+int total_lines(FILE *fp)
+{
+  int total=0, ch;
+  do
+  {
+  	if((ch = fgetc(fp)) == '\n')
+  		total++;
+  }while(ch != EOF);
+  rewind(fp);
+  return total;
+}
+
+void print_help(void)
+{
+  puts("\nMost commands optionally preceded by integer argument k.  Defaults in brackets.");
+  puts("Star (*) indicates argument becomes new default.");
+  puts("---------------------------------------"
+       "----------------------------------------");
+  puts(
+"<space>               Display next k lines of text [current screen size]\n"
+"z                     Display next k lines of text [current screen size]*\n"
+"<return>              Display next k lines of text [1]*\n"
+"d or ctrl-D           Scroll k lines [current scroll size, half screenful]*\n"
+"q or Q or <interrupt>   Exit from more\n"
+"s                     Skip forward k lines of text [1]\n"
+"f                     Skip forward k screenfuls of text [1]\n"
+"b or ctrl-B           Skip backwards k screenfuls of text [1]*\n"
+"k                     Skip backwards k lines of text [1]*\n"
+"u                     Skip backwards half screenful of text [1]*\n"
+"=                     Display current line number\n"
+"/<regular expression>   Search for kth occurrence of regular expression [1]\n"
+"n                     Search for kth occurrence of last r.e [1]\n"
+"!<cmd>                Execute <cmd> in a subshell\n"
+"v                     Start up /usr/bin/vi at current line\n"
+"ctrl-L                Redraw screen\n"
+":n                    Go to kth next file [1]\n"
+":p                    Go to kth previous file [1]\n"
+":f                    Display current file name and line number\n"
+".                     Repeat previous command"
+);
+  puts("---------------------------------------"
+       "----------------------------------------");
+  return;
+}
+
+int line_skeep(FILE *file, char str, int new, int old)
+{
+  int ch, rws, cols, ret; //count=1;
+
+  get_screen_size(&rws, &cols);
+  printf("\033[2K\r");
+  printf("HI\n");
+  if(str == 's')
+  {
+  	rws=((new==0)?2:(new+1));
+  	if(new == 0)
+  		puts("\n...skipping one line");
+  	else if(old)				//old->to distinguish between option '-l' & input 's' 
+  		fprintf(stdout, "\n...skipping %d lines\n", (rws-1));
+  }
+  else if(str == 'f')
+  {
+  	rws=((old==0)?rws:(old+1));
+  	rws=((new==0)?rws:(new*(rws-1)+1));
+  	fprintf(stdout, "\n...skipping %d lines\n", (rws-1));
+  }
+  ret=rws-1;
+  while(--rws > 0)
+  {
+  	while((ch=fgetc(file)) != '\n' && ch != EOF)
+  	{
+  		;
+  	}
+  	if(ch == EOF)
+  	{
+  		fclose(file);
+  		TT.file_count--;
+  		if(TT.file_count <= 0)
+  		{
+  			if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  				fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  			exit(0);
+  		}
+  		else
+  		{	
+  			TT.skip_flag=1;
+  			return 0;
+  		}
+  	}
+  	if(ch == '\n' );
+  }
+  return ret;
+}
+
+void file_edit(int rw_count, int rws)
+{
+  pid_t pid;
+  int ret;
+  int arg;
+  char *editor;
+  char buf[10];
+
+  if((pid = fork()) < 0)
+  {
+  	fprintf(stderr, "Error Caused, Editor can't be opened: %s\n", strerror(errno));
+  	return;
+  }
+  else if(pid == 0)
+  {
+  	if((editor=getenv("VISUAL")) == (char *)0)
+  		if((editor=getenv("EDITOR")) == (char *)0)
+  			editor="vi";
+  	if(rw_count == (rws -1))
+  	{
+  		arg=1;
+  	}
+  	else
+  	{
+  		if(!TT.vi_flag)
+  			arg=1 + (rw_count/2);
+  		else if(TT.vi_flag)
+  			arg=(rw_count-(rws/2));
+  	}
+  	printf("\033[2K\r");
+  	if(strcmp(editor, "vi") == 0)
+  	{
+  		sprintf(buf, "%d", arg);
+  		printf("%s -c %d %s------------------------\n", editor, arg, TT.filename);
+  		if(execlp(editor, editor, "-c", buf, TT.filename, NULL) == -1)
+  			perror("Editor Error: ");
+  	}
+  	else if(strcmp(editor, "gedit") == 0)
+  	{
+  		sprintf(buf, "+%d", arg);
+  		printf("%s +%d %s------------------------\n", editor, arg, TT.filename);
+  		if(execlp(editor, editor, buf, TT.filename, NULL) == -1)
+  			perror("Editor Error: ");
+  	}
+  }
+  if(wait(&ret) != pid)
+  	perror("Error handling editor: ");
+  return;
+}
+
+void line_skeep_back(FILE *file, char str, int *rw_cnt,  int new, ...)
+{
+  int rws, cols, ch, count, ret;
+  int old;
+  va_list arg;
+
+  va_start(arg, new);
+  get_screen_size(&rws, &cols);
+  printf("\033[2K\r");
+  if(str == 'b' || str == CTRL('B'))
+  {
+  	old=va_arg(arg, int);
+  	va_end(arg);
+  	rws=((old==0)?(rws):(old+1));
+  	rws=((new==0)?(rws*2):rws*(new+1)-(new-1));
+
+  	if(new == 0 || new == 1)
+  		puts("\n...back 1 page");
+  	else
+  		fprintf(stdout, "\n...back %d pages\n", new);
+  }
+  else if(str == CTRL('l'))
+  {
+  	old=va_arg(arg, int);
+  	cols=va_arg(arg, int);			//cols=previous screen columns
+  	va_end(arg);
+
+  	if(rws == new)				//new=previous screen rows
+  		rws=((old==0)?rws:(old+1));
+  	else
+  		rws=((old==0)?new:(old+1));
+  }
+  else if(str == 'k')
+  {
+  	old=va_arg(arg, int);
+  	va_end(arg);
+  	rws=((old==0)?rws:(old+1));
+  	rws=((new==0)?(rws+2):(rws+new+1));
+
+  	if(new == 0|| new == 1)
+  		puts("\n...back one line");
+  	else
+  		fprintf(stdout, "\n...back %d lines\n", new);
+  }
+  else if(str == 'u')
+  {
+  	if(new == 0)
+  		fprintf(stdout, "\n...back %d lines\n", (rws-1)/2);
+  	else
+  		fprintf(stdout, "\n...back %d lines\n", new);
+  	rws=((new==0)?(rws+(rws/2)):(rws+new+1));
+  }
+  ret=rws-1;
+  fseek(file, -1, SEEK_CUR);
+  while(rws > 0)
+  {
+  	count=1;
+  	while(1)
+  	{
+  		ch=fgetc(file);
+  		fseek(file, -2, SEEK_CUR);
+  		if(ch == '\t')
+  			count+=8;
+  		else
+  			count++;
+  		if(ch=='\n' || ftell(file) == 0 || count > cols)
+  			break;
+  	}
+  	if(ftell(file) == 0 && rws > 0)
+  	{
+  		*rw_cnt=0;
+  		break;
+  	}
+  	rws--;
+  }
+  if(rws == 0)
+  	*rw_cnt-=ret;
+  if(ftell(file) != 0)
+  	fseek(file, 2, SEEK_CUR);
+  return;
+}
+
+long pattern_find(FILE *file, char *patt, char str, int *rw_count)
+{
+  long row_loc, temp_loc, act_loc;
+  char *temp;
+  int ch, rws, cols, i, cnt=0;
+
+  get_screen_size(&rws, &cols);
+  act_loc=ftell(file);
+  line_skeep_back(file, CTRL('L'), rw_count, rws, 0, cols);
+  row_loc=ftell(file);
+  temp_loc=row_loc;
+
+  temp=(char *)malloc(sizeof(patt));
+
+  for(;;)
+  {
+  	i=0;
+  	while((ch=fgetc(file)) == ' ' || ch == '\t');
+  	while(ch != ' ' && ch != '\t' && ch != '\n' && (i < strlen(patt)))
+  	{
+  		temp[i]=ch;
+  		ch=fgetc(file);
+  		i++;
+  	}
+  	temp[i]='\0';
+  	if(strcmp(patt, temp) == 0)
+  	{
+  		if(str != 'n')
+  		{
+  			row_loc = temp_loc;
+  			break;
+  		}
+  		else if(row_loc != temp_loc)
+  		{
+  			row_loc = temp_loc;
+  			break;
+  		}
+  	}
+  	else if(ch == EOF)
+  	{
+  		fseek(file, act_loc, SEEK_SET);
+  		row_loc=-1;
+  		break;
+  	}
+  	else if(ch == '\n')
+  	{
+  		cnt++;
+  		temp_loc=ftell(file);
+  	}
+  	memset(temp, '\0', sizeof(temp));
+  }
+  if(ch != EOF)
+  	*rw_count+=cnt;
+  else
+  	*rw_count+=(rws-1);
+  fflush(stdout);
+
+  return row_loc;
+}
+
+int copy_file(FILE *file, int rws, int *row_count, char cur_str)
+{
+  int columns, rows, col_count, ch; 
+  static int flag = 1;
+
+  get_screen_size(&rows, &columns);
+  rows=rws;
+
+  while(--rows > 0)
+  {
+  	col_count=1;
+  	while((ch=fgetc(file)) != '\n' && col_count < columns && ch != EOF)
+  	{
+  		if(ch == '\t')
+  			col_count+=8;
+  		else
+  			col_count++;
+  		fputc(ch,stdout);
+  	}
+  	if((ch == '\n') || (col_count >= columns))
+  	{
+  		if(ch == '\n')
+  		{
+  			if(col_count == 1)
+  			{
+  				if(flag)
+  				{
+  					fputc(ch, stdout);
+  					if(toys.optflags & FLAG_s)
+  						flag = 0;
+  				}
+  				else
+  				{
+  					rows++;
+  					(*row_count)++;
+  				}
+  			}
+  			else
+  			{
+  				fputc(ch, stdout);
+  				flag = 1;
+  			}
+  		}
+  		else
+  		{
+  			fputc(ch,stdout);
+  			if(cur_str != 'k'&&cur_str != CTRL('L')&&cur_str != 'b'&&cur_str != 'u')
+  				(*row_count)--;
+  		}
+  		continue;
+  	}
+  	else if(ch == EOF)
+  	{
+  		fclose(file);
+  		TT.file_count--;
+  		if(TT.file_count <= 0)
+  		{
+  			if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  				fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  			exit(0);
+  		}
+  		else
+  			return 1;
+  	}
+  }
+  return 0;
+}
+
+void more_main(void)
+{
+  int i; 
+  int screen_rows;			//hold the screen row size
+  int total_line=0;			//for the total lines in a file
+  int rows;					//row size of the screen / terminal
+  int columns;				//column size of the screen / terminal
+  int row_count=0;			//to count the number of lines read of the open file
+  int old_arg=0;				//to hold the fixed numeral arguments
+  int new_arg=0;				//to hold the passed numeral arguments
+  int d_arg=0;				//to hold the numeral argument for 'd' feature
+  int u_arg=0;				//to hold the numeral argument for 'u' feature
+  int dot_arg=0;				//to hold the numeral argument for '.' feature
+  int l_arg=0;				//to hold the numeral argument for 'CTRL('l') feature
+  FILE *file=NULL;			//for the file to be read
+  long ptr_loc;				//needed for the pattern_matching, hold the reading head position
+  int in_tty;					//for the input terminal
+  int out_tty;				//for the output terminal
+  struct stat st;
+  char ch;
+  char prev_str='\0';			//hold the previous input passed
+  char cur_str='\0';			//hold the current input passed
+  char cmd_call[20]={'\0'};	//for the '!' commmand call
+  char arg_str[30]={'\0'};	//for the '=' feature
+  char patt_str[30]={'\0'};	//for the pattern matching
+
+  signal(SIGINT, signal_handler);
+  
+  out_tty=isatty(STDOUT_FILENO);
+  if((in_tty=isatty(STDIN_FILENO)) && !(toys.optc == 1 && strcmp(*toys.optargs, "-") == 0))
+  	TT.tty_fileno=STDIN_FILENO;
+  else
+  	TT.tty_fileno=STDOUT_FILENO;
+
+  if(tcgetattr(TT.tty_fileno, &TT.term) < 0)
+  {
+  	fprintf(stderr, "Can't get terminal attributes: %s", strerror(errno));
+  	exit(EXIT_FAILURE);
+  }
+  memcpy(&TT.buff, &TT.term,sizeof(TT.buff));
+  TT.buff.c_lflag &= ~(ECHO | ICANON);
+  TT.buff.c_cc[VMIN] = 1;
+  TT.buff.c_cc[VTIME] = 0;
+
+  if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.buff) < 0)
+  {
+      tcsetattr(TT.tty_fileno, TCSANOW, &TT.term);
+          exit(EXIT_FAILURE);
+     }
+  get_screen_size(&rows, &columns);
+  screen_rows=rows;
+  TT.file_count=toys.optc;
+
+  if(!in_tty)
+  {
+  	file = stdin;
+  	TT.file_flag=1;
+  	toys.optc++;
+  	TT.file_count=toys.optc;
+  }
+  else if(out_tty)
+  {
+  	if(toys.optc < 1 || (strcmp(*toys.optargs,"-") == 0 && toys.optc == 1))
+  	{
+  		printf("usage: %s [-dfs] [-n number] [-l num] [-p string] [file...]\n", toys.which->name);
+  		if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  			fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  		exit(0);
+  	}
+
+loop:  if(*toys.optargs)
+  	{
+  		TT.filename=*toys.optargs;
+  if(strcmp(*toys.optargs, "-") == 0 && ((TT.file_count == toys.optc) || (!in_tty && TT.file_count == toys.optc-1)))
+  		{
+  			printf("\033[2K\r");
+  			TT.file_count--;
+  			if(!in_tty && toys.optc == 2)
+  			{
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  				exit(0);
+  			}
+  			toys.optargs++;
+  			goto loop;
+  		}
+  		if((file = fopen(TT.filename, "r")) == NULL)
+  		{
+  			printf("\033[2K\r");
+  			fprintf(stderr,"%s: %s\n",TT.filename,strerror(errno));
+  			TT.file_count--;
+  			if(TT.file_count <= 0)
+  			{
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  				exit(0);
+  			}
+  			else
+  			{
+  				TT.file_flag=1;
+  				toys.optargs++;
+  				goto loop;
+  			}
+  		}
+  		else
+  		{
+  			TT.loop_exit=1;
+  			memset(arg_str, '\0', sizeof(arg_str));
+  			total_line = total_lines(file);
+  			row_count = 0;
+  			if(TT.file_flag)
+  			{
+  				printf("---MORE---(next file %s)", TT.filename);
+  				fflush(stdout);
+  				goto jump;
+  			}
+  		}
+  	}
+  }
+  st.st_size = 0;
+  fstat(fileno(file), &st);
+
+  if(file != NULL)
+  {
+  	if(toys.optflags & FLAG_n)
+  		rows=TT.n_number+1;
+
+  	if(toys.optflags & FLAG_l)
+  		if(!in_tty || (strcmp(TT.filename, toys.optargs[0]) == 0 && in_tty))
+  			row_count+=line_skeep(file, 's', (TT.l_number-1), 0);
+
+  	if((toys.optflags & FLAG_p) && file != stdin)
+  	{
+  		if(strcmp(TT.filename, toys.optargs[0]) == 0)
+  		{
+  			if((ptr_loc=pattern_find(file, TT.p_string, '/', &row_count)) == -1)
+  			{
+  				printf("Pattern Not Found");
+  				fflush(stdout);
+  				goto jump;
+  			}
+  			else
+  			{
+  				fseek(file, ptr_loc, SEEK_SET);
+  				strcpy(patt_str, TT.p_string);
+  			}
+  		}
+  		else
+  			memset(patt_str, '\0', sizeof(patt_str));
+  	}
+
+  	while(1)
+  	{
+  		if(TT.loop_exit)
+  		{
+  			if(toys.optc > 1)
+  			{
+  				printf("\033[2K\r");
+  				puts("::::::::::::::");
+  				printf("%s\n", TT.filename);
+  				puts("::::::::::::::");
+  				if((rows+3) > screen_rows)
+  					rows-=((rows+3)-screen_rows);
+  				TT.file_flag=1;
+  			}
+  			TT.loop_exit=0;
+  		}
+
+  		printf("\033[2K\r");
+
+  		row_count+=(rows-1);
+
+  		if(copy_file(file, rows, &row_count, cur_str))
+  		{
+  			if(file != stdin)
+  				toys.optargs++;
+  			goto loop;
+  		}
+  		if(row_count >= total_line && file != stdin)
+  		{
+  			fclose(file);
+  			TT.file_count--;
+                              if(TT.file_count<=0)
+  			{
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+                                  exit(0);
+  			}
+  			else
+  			{
+  				toys.optargs++;
+  				goto loop;
+  			}
+  		}
+  		if(file != stdin)
+  			printf("---MORE---(%d%%)",(row_count*100)/total_line);
+  		else
+  			printf("---MORE---");
+  		if(toys.optflags & FLAG_d)
+  			printf("[Press <space> to continue, 'q' to quit.]");
+  		fflush(stdout);
+
+jump:  	if(read(TT.tty_fileno, &cur_str, 1) < 0)
+  		{
+  			perror("READ ERROR: ");
+  			exit(EXIT_FAILURE);
+  		}
+
+  		if(isdigit(cur_str))
+  		{
+  			strcat(arg_str, &cur_str);
+  			arg_str[strlen(arg_str)-2]='\0';
+  			goto jump;
+  		}
+  		new_arg=atoi(arg_str);
+  		memset(arg_str, '\0', sizeof(arg_str));
+
+  		if(toys.optflags & FLAG_n)
+  			old_arg=TT.n_number;
+
+swap:  	switch(cur_str)
+  		{
+  			case '\n':
+  				get_screen_size(&rows, &columns);
+  				screen_rows=rows;
+  				rows=((new_arg==0)?2:(new_arg+1));
+  				old_arg=((new_arg==0)?old_arg:new_arg);
+  				dot_arg=new_arg;
+  				prev_str=cur_str;
+  				break;
+  			case ' ':
+  				get_screen_size(&rows, &columns);
+  				screen_rows=rows;
+  				rows=((new_arg==0)?((old_arg==0)?rows:(old_arg+1)):(new_arg+1));
+  				dot_arg=new_arg;
+  				TT.vi_flag=1;
+  				prev_str=cur_str;
+  				break;
+  			case 'q':
+  			case 'Q':
+  				fclose(file);
+  				printf("\033[2K\r");
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  				exit(0);
+  			case 'h':
+  			case '?':
+  				if(toys.optflags & FLAG_f)
+  					printf("\033[2J\033[1;1H");
+  				print_help();
+  				prev_str=cur_str;
+  				rows=1;
+  				break;
+  			case 's':
+  				row_count+=line_skeep(file, cur_str, new_arg, 1);
+  				get_screen_size(&rows, &columns);
+  				rows=((old_arg==0)?rows:(old_arg+1));
+  				dot_arg=new_arg;
+  				if(TT.skip_flag == 1)
+  				{
+  					toys.optargs++;
+  					goto loop;
+  				}
+  				prev_str=cur_str;
+  				break;
+  			case CTRL('f'):
+  			case 'f':
+  				get_screen_size(&rows, &columns);
+  				rows=((old_arg==0)?rows:(old_arg+1));
+  				row_count+=line_skeep(file, cur_str, new_arg, old_arg);
+  				dot_arg=new_arg;
+  				if(TT.skip_flag == 1)
+  				{
+  					toys.optargs++;
+  					goto loop;
+  				}
+  				prev_str=cur_str;
+  				break;
+  			case 'v':
+  				if(file != stdin)
+  				{
+  					get_screen_size(&rows, &columns);
+  					file_edit(row_count, rows);
+  					prev_str=cur_str;
+  				}
+  				rows=1;
+  				break;
+  			case 'z':
+  				get_screen_size(&rows, &columns);
+  				screen_rows=rows;
+  				old_arg=((new_arg==0)?old_arg:new_arg);
+  				rows=((old_arg==0)?rows:(old_arg+1));
+  				dot_arg=new_arg;
+  				TT.vi_flag=1;
+  				prev_str=cur_str;
+  				break;
+  			case CTRL('d'):
+  			case 'd':
+  				get_screen_size(&rows, &columns);
+  				screen_rows=rows;
+  				d_arg=((new_arg==0)?d_arg:new_arg);
+  				TT.vi_flag=1;
+  				rows=((d_arg==0)?(rows/2):(d_arg+1));
+  				dot_arg=d_arg;
+  				prev_str=cur_str;
+  				break;
+  			case CTRL('L'):
+  				if(file != stdin)
+  				{
+  					printf("\033[2K\r");
+  					printf("\033[2J\033[1;1H");
+  					l_arg=((old_arg==0)?l_arg:old_arg);
+  					line_skeep_back(file, cur_str, &row_count, screen_rows, l_arg, columns);
+  					get_screen_size(&rows, &columns);
+  					if(rows == screen_rows)
+  						rows=((l_arg==0)?rows:(l_arg+1));
+  					else
+  					{
+  						screen_rows=rows;
+  						l_arg=0;
+  						old_arg=0;
+  					}
+  					dot_arg=l_arg;
+  					prev_str=cur_str;
+  					break;
+  				}
+  				else
+  					goto jump;
+  			case 'b':
+  			case CTRL('B'):
+  				if(file != stdin)
+  				{
+  					get_screen_size(&rows, &columns);
+  					line_skeep_back(file, cur_str, &row_count, new_arg, old_arg);
+  					if(ftell(file) != 0)
+  						rows=((old_arg==0)?(rows+1):(old_arg+2));
+  					else
+  						rows=((old_arg==0)?rows:(old_arg+1));
+  					dot_arg=new_arg;
+  					prev_str=cur_str;
+  					break;
+  				}
+  				else
+  					goto jump;
+  			case 'k':
+  				if(file != stdin)
+  				{
+  					get_screen_size(&rows, &columns);
+  					line_skeep_back(file, cur_str, &row_count, new_arg, old_arg);
+  					if(ftell(file) != 0)
+  						rows=((old_arg==0)?(rows+1):(old_arg+2));
+  					else
+  						rows=((old_arg==0)?rows:(old_arg+1));
+  					dot_arg=new_arg;
+  					prev_str=cur_str;
+  					break;
+  				}
+  				else
+  					goto jump;
+  			case 'u':
+  				if(file != stdin)
+  				{
+  					get_screen_size(&rows, &columns);
+  					u_arg=((new_arg==0)?u_arg:new_arg);
+  					line_skeep_back(file, cur_str, &row_count, u_arg);
+  					if(ftell(file) != 0)
+  						rows=((old_arg==0)?(rows+1):(old_arg+2));
+  					else
+  						rows=((old_arg==0)?rows:(old_arg+1));
+  					dot_arg=new_arg;
+  					prev_str=cur_str;
+  					break;
+  				}
+  				else
+  					goto jump;
+  			case '!':
+  				printf("\033[2K\r");
+  				fflush(stdout);
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  				write(TT.tty_fileno, &cur_str, 1);
+  				if(prev_str != '.')
+  				{
+  					if((ch=read(TT.tty_fileno, cmd_call, 20)) < 0)
+  					{
+  						perror("READ ERROR: ");
+  						exit(EXIT_FAILURE);
+  					}
+  					cmd_call[ch-1] = '\0';
+  				}
+  				else
+  					fprintf(stdout, "%s\n", cmd_call);
+  						
+  				system(cmd_call);
+  				puts("---------------------------------");
+  				if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.buff) < 0)
+  					fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  				prev_str=cur_str;
+  				rows=1;
+  				break;
+  			case '=':
+  				printf("\033[2K\r");
+  				fflush(stdout);
+  				i=sprintf(arg_str,"%d",row_count);
+  				write(TT.tty_fileno, arg_str, i);
+  				prev_str=cur_str;
+  				memset(arg_str, '\0', sizeof(arg_str));
+  				goto jump;
+  			case '.':
+  				cur_str=prev_str;
+  				new_arg=dot_arg;
+  				prev_str='.';
+  				goto swap;
+  			case ':':
+  				if(prev_str != '.')
+  					if(read(TT.tty_fileno, &ch, 1) < 0)
+  					{
+  						perror("Read Error: ");
+  						exit(EXIT_FAILURE);
+  					}
+  				switch(ch)
+  				{
+  					case 'f':
+  						printf("\033[2K\r");
+  						fflush(stdout);
+  						i=sprintf(arg_str, "\"%s\" line %d", TT.filename, row_count);
+  						write(TT.tty_fileno, arg_str, i);
+  						memset(arg_str, '\0', sizeof(arg_str));
+  						break;
+  					case 'n':
+  						fclose(file);
+  						printf("\033[2K\r");
+  						dot_arg=new_arg;
+  						if(new_arg==0)
+  							new_arg++;
+  						while(new_arg > 0)
+  						{
+  							TT.file_count--;
+  							if(TT.file_count <= 0)
+  							{
+  								if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  									perror("TCSETATTR error: ");
+  								exit(0);
+  							}
+  							if(file == stdin && new_arg == 1)
+  							{
+  								if(strcmp(*toys.optargs, "-") == 0)
+  								{
+  									if(toys.optc == 2)
+  									{
+  										printf("\033[2K\r");
+  										if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+                                          	perror("TCSETATTR error: ");
+                                      	exit(0);
+  									}
+  									else
+  									{
+  										toys.optargs++;
+  										TT.file_count--;
+  									}
+  								}
+  							}
+  							else if(!(file == stdin && new_arg == 1))
+  								toys.optargs++;
+  							new_arg--;
+  						}
+  						puts("\n...Skipping");
+  						fprintf(stdout, "...Skipping to file %s\n\n", *toys.optargs);
+  						break;
+  					case 'p':
+  						if(file != stdin)
+  						{
+  							if(ftell(file) == 0)
+  								new_arg=((new_arg == 0)?2:new_arg);
+  							fclose(file);
+  							printf("\033[2K\r");
+  							dot_arg=new_arg;
+  							puts("\n...Skipping");
+  							while(new_arg > 1)
+  							{
+  								if(TT.file_count == toys.optc || (!in_tty && TT.file_count == toys.optc-1))
+  									break;
+  								else
+  								{
+  									toys.optargs--;
+  									TT.file_count++;
+  									if(strcmp(*toys.optargs, "-") == 0)
+  									{
+  										if(!in_tty && TT.file_count == toys.optc-1)
+  										{
+  											toys.optargs++;
+  											TT.file_count--;
+  										}
+  									}
+  								}
+  								new_arg--;
+  							}
+  							fprintf(stdout, "...Skipping back to file %s\n\n", *toys.optargs);
+  							break;
+  						}
+  						else
+  							goto jump;
+  					default:
+  						if(toys.optflags & FLAG_d)
+  						{
+  							printf("\033[2K\r");
+  							printf("[Press 'h' for help instructions.]");
+  							fflush(stdout);
+  						}
+  						goto jump;
+  				}
+  				prev_str=cur_str;
+  				if(ch == 'f')
+  					goto jump;
+  				else
+  					goto loop;
+  			case '/':
+  			case 'n':
+  				if(file != stdin)
+  				{
+  					printf("\033[2K\r");
+  					fflush(stdout);
+  					if(cur_str == 'n')
+  					{
+  						if(strlen(patt_str) == 0)
+  						{
+  							printf("Nothing to search");
+  							fflush(stdout);
+  							goto jump;
+  						}
+  					}
+  					if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  						fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  					write(TT.tty_fileno, "/", 1);
+  					if(prev_str != '.' && cur_str != 'n')
+  					{
+  						if((ch=read(TT.tty_fileno, patt_str, sizeof(patt_str))) < 0)
+  							exit(EXIT_FAILURE);
+  						patt_str[ch-1]='\0';
+  					}
+  					else
+  						fprintf(stdout, "%s\n", patt_str);
+  					get_screen_size(&rows, &columns);
+  					screen_rows=rows;
+  					if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.buff) < 0)
+  						fprintf(stderr, "Can't set terminal attributes: %s", strerror(errno));
+  					if(strlen(patt_str)==0||(ptr_loc=pattern_find(file, patt_str, cur_str, &row_count))==-1)
+  					{
+  						printf("Pattern Not Found");
+  						fflush(stdout);
+  						prev_str=cur_str;
+  						goto jump;
+  					}
+  					else
+  					{
+  						fseek(file, ptr_loc, SEEK_SET);
+  						prev_str=cur_str;
+  						break;
+  					}
+  				}
+  				else
+  					goto jump;
+  			default:
+  				if(toys.optflags & FLAG_d)
+  				{
+  					printf("\033[2K\r");
+  					printf("[Press 'h' for help instructions.]");
+  					fflush(stdout);
+  				}
+  				goto jump;
+  		}
+          if(toys.optflags & FLAG_f)
+  			if(cur_str != 'h' && cur_str != '?')
+  				if((cur_str == '\n' && new_arg != 0) || cur_str != '\n')
+                  	printf("\033[2J\033[1;1H");
+  	}
+  }
+  if(tcsetattr(TT.tty_fileno, TCSANOW, &TT.term) < 0)
+  	perror("TCSETATTR Error - final: ");
+  return;
+}

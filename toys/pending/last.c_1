@@ -1,0 +1,326 @@
+/* vi: set sw=4 ts=4:
+ *
+ * last.c - A program to show the listings of last logged in users.
+ *
+ * Copyright 2012 VIKASH KUMAR <k.vikash@samsung.com>
+ *
+
+USE_LAST(NEWTOY(last,"f:W", TOYFLAG_USR|TOYFLAG_BIN ))
+
+config LAST
+  bool "last"
+  default n 
+  help
+    usage: last [-W] [-f FILE] [name...] [tty...]
+
+    A program to reset the terminal.
+
+    options:
+  -W : Display the informations without host-column truncation.
+  -f FILE : Read from file FILE instead of /var/log/wtmp.
+  name... : Search for username 'name' and show result only for that.
+  tty... : Search for terminal name 'tty' and show result only for that.
+
+*/
+#define FOR_last
+
+#include "toys.h"
+#include <utmp.h>
+
+#define DAY_SEC 86400  //24*60*60
+
+#ifndef SHUTDOWN_TIME
+#define SHUTDOWN_TIME 254
+#endif
+
+struct tty{
+  char tty_name[32];
+  time_t exit_time;
+  struct tty *next;
+};
+enum{NO,YES};
+
+GLOBALS(
+
+  char *f_file;
+
+  int t_flag;
+  int o_flag;
+  int flag;
+  struct tty *tty_list;
+)
+
+
+struct tty * deltty(struct utmp bt, int check)
+{
+  struct tty *temp, *prev, *ret_tty;
+  time_t tm;
+  temp = TT.tty_list;
+  prev = temp;
+  time(&tm);
+  while(temp != NULL)
+  {
+      if(strcmp(temp->tty_name, bt.ut_line) == 0)
+      {
+          ret_tty=temp;
+
+          if(strcmp(bt.ut_line, "system boot") == 0)
+          {
+              if(!check)
+              {
+                  TT.t_flag = 1;
+                  TT.o_flag = 0;
+                  return ret_tty;
+              }
+          }
+          if(temp == TT.tty_list)
+          {
+              TT.tty_list = temp->next;
+              free(temp);
+              return ret_tty;
+          }
+          else
+          {
+              prev->next = temp->next;
+              free(temp);
+              return ret_tty;
+          }
+      }
+      else
+      {
+          prev = temp;
+          temp = temp->next;
+      }
+  }
+  return NULL;
+}
+
+void addtty(struct utmp bt)
+{
+  struct tty *temp;
+  temp = (struct tty *)malloc(sizeof(struct tty));
+  strcpy(temp->tty_name, bt.ut_line);
+  temp->exit_time = (time_t)bt.ut_tv.tv_sec;
+  if(strcmp(bt.ut_line, "system boot") == 0)
+      deltty(bt, YES);
+  if(TT.tty_list == NULL)
+  {
+      TT.tty_list = temp;
+      TT.tty_list->next = NULL;
+  }
+  else
+  {
+      temp->next = TT.tty_list;
+      TT.tty_list = temp;
+  }
+}
+
+void diff_time(time_t end, time_t start)
+{
+  time_t diff;
+  double dif;
+  dif=difftime(end, start);
+
+  if(dif > 0)
+  {
+      diff = end - start;
+      if(dif > DAY_SEC)
+          {if(TT.flag)printf("(%d+%5.5s)\n", ((int)dif/DAY_SEC), asctime(gmtime(&diff))+11);}
+      else
+          {if(TT.flag)printf(" (%5.5s)\n", asctime(gmtime(&diff))+11);}
+  }
+  else
+  {
+      diff = start - end;
+      dif = -dif;
+      if(dif > DAY_SEC)
+          {if(TT.flag)printf("(-%d-%5.5s)\n", ((int)dif/DAY_SEC), asctime(gmtime(&diff))+11);}
+      else
+          {if(TT.flag)printf(" (-%5.5s)\n", asctime(gmtime(&diff))+11);}
+  }
+}
+
+void check_args(struct utmp ut)
+{
+  int count;
+  char **ptr;
+
+  count = toys.optc;
+  ptr = toys.optargs;
+
+  while(count-- > 0)
+  {
+  	if(strcmp(*ptr, ut.ut_user) != 0)
+  	{
+  		if(strcmp(*ptr, ut.ut_line) != 0)
+  		{
+  			TT.flag = 0;
+  			ptr++;
+  			continue;
+  		}
+  		else
+  		{
+  			TT.flag = 1;
+  			return;
+  		}
+  	}
+  	else
+  	{
+  		TT.flag = 1;
+  		return;
+  	}
+  }
+  return;
+}
+
+void last_main(void)
+{
+  struct tty *temp;
+  struct utmp ut;
+  int n, fd;
+  off_t loc;
+  time_t tmp, tm, crash_time=0;
+  char t_name[32];
+  char *file;
+
+  if(toys.optflags & FLAG_f)
+  	file = TT.f_file;
+  else
+  	file = "/var/log/wtmp";
+
+  TT.tty_list = NULL;
+  time(&tm);
+  TT.flag=1;
+
+  if((fd=open(file, O_RDONLY)) == -1)
+  {
+  	fprintf(stdout, "%s:%s\n", file, strerror(errno));
+  	exit(EXIT_FAILURE);
+  }
+
+  loc = lseek(fd, 0, SEEK_END);
+  loc = lseek(fd, loc - sizeof(ut), SEEK_SET);
+
+  while((n = read(fd, &ut, sizeof(ut))) != 0)
+  {
+  	if(n != sizeof(ut))
+  	{
+  		printf("Incomplete Read: \n");
+  		exit(EXIT_FAILURE);
+  	}
+  	if(toys.optc > 0)
+  		check_args(ut);
+
+  	if(strcmp(ut.ut_line, "~\0") == 0)
+  	{
+  		if(strcmp(ut.ut_user, "runlevel") == 0)
+  			ut.ut_type = RUN_LVL;
+  		else if(strcmp(ut.ut_user, "reboot") == 0)
+  			ut.ut_type = BOOT_TIME;
+  		else if(strcmp(ut.ut_user, "shutdown") == 0)
+  		{
+  			TT.o_flag=1;
+  			crash_time=(time_t)ut.ut_tv.tv_sec;
+  			strcpy(ut.ut_line, "system boot");
+  			ut.ut_type = SHUTDOWN_TIME;
+  			addtty(ut);
+  		}
+  	}
+  	else
+  	{
+  		if(ut.ut_user[0] == '\0' || strcmp(ut.ut_user, "LOGIN") == 0)
+  		{
+  			if(ut.ut_user[0] == '\0' && ut.ut_host[0] != '\0')
+  			{
+  				strcpy(t_name, ut.ut_line);
+  				addtty(ut);
+  			}
+  			goto jump;
+  		}
+  		if(ut.ut_host[0] == '\0' && ut.ut_user[0] != '\0')
+  		{
+  			addtty(ut);
+  			goto jump;
+  		}
+  		if(ut.ut_type != DEAD_PROCESS && ut.ut_user[0] && ut.ut_line[0])
+  			ut.ut_type = USER_PROCESS;
+  	}
+
+  	if(ut.ut_type != USER_PROCESS)
+  	{
+  		switch(ut.ut_type)
+  		{
+  			case BOOT_TIME:
+  				strcpy(ut.ut_line, "system boot");
+  				crash_time=(time_t)ut.ut_tv.tv_sec;
+  				break;
+  			case RUN_LVL:
+  			case SHUTDOWN_TIME:
+  				goto jump;
+  		}
+  	}
+
+  	tmp = (time_t)ut.ut_tv.tv_sec;
+
+  	if(toys.optflags & FLAG_W)
+  		{if(TT.flag)printf("%-9.8s%-13.13s%-45.45s%-16.16s - ",ut.ut_user, ut.ut_line, ut.ut_host, ctime(&tmp));}
+  	else
+  		{if(TT.flag)printf("%-9.8s%-13.13s%-17.16s%-16.16s - ",ut.ut_user, ut.ut_line, ut.ut_host, ctime(&tmp));}
+
+  	temp = (struct tty *)malloc(sizeof(struct tty));
+  	temp = deltty(ut, NO);
+
+  	if(temp == NULL)
+  	{
+  		if(strcmp(ut.ut_line, "system boot") == 0)
+  		{
+  			TT.t_flag=1;
+  			TT.o_flag=0;
+  			if(TT.flag)printf("%-5.5s ", ctime(&tm)+11);
+  			diff_time(tm, tmp);
+  		}
+  		else if(strcmp(ut.ut_line, t_name) == 0)//(strncmp(ut.ut_line, "tty", 3) == 0)
+  		{
+  			if(TT.t_flag)
+  			{
+                  if(TT.flag)printf("%s", (TT.o_flag==0?"crash ":"down  "));
+  				diff_time(crash_time, tmp);
+  			}
+              else
+  				printf("%s\n", ((strcmp(file, "/var/log/wtmp")==0)?"still logged in":"gone,no logout"));
+  		}
+  		else
+  		{
+  			if(TT.flag)printf("%s", (TT.t_flag==0?((strcmp(file, "/var/log/wtmp")==0)?"still logged in\n":"gone,no logout\n"):"crash "));
+  			if(TT.t_flag)
+  				diff_time(crash_time, tmp);
+  		}
+  	}
+  	else
+  	{
+  		if(strcmp(ut.ut_line, t_name) == 0)//(strncmp(ut.ut_line, "tty", 3) == 0)
+  		{
+  			if(TT.t_flag)
+  			{
+  				TT.t_flag = 0;
+  				if(TT.flag)printf("%s ", "down ");
+  			}
+  			else
+  				{if(TT.flag)printf("%-5.5s ", ctime(&temp->exit_time)+11);}
+  		}
+  		else
+  			{if(TT.flag)printf("%-5.5s ", ctime(&temp->exit_time)+11);}
+  		diff_time(temp->exit_time, tmp);
+  	}
+
+jump:  	loc -= sizeof(ut);
+  	if(loc < 0)
+  		break;
+  	lseek(fd, loc, SEEK_SET);
+  }
+  fflush(stdout);
+  close(fd);
+  printf("\n%s begins %-24.24s\n", basename(file), (ctime(&tmp)));
+
+  return;
+}
