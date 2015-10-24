@@ -8,9 +8,10 @@ ConditionKernelCommandLine=|!sec_debug.enable_user=0
 [Service]
 Type=forking
 ExecStart=/sbin/klogd
-OOMScoreAdjust=-1000
+OOMScoreAdjust=-900
 Restart=always
 RestartSec=0
+SmackProcessLabel=klogd
 
 [Install]
 WantedBy=basic.target

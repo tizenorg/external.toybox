@@ -86,7 +86,7 @@ static void loopback_setup(char *device, char *file)
   // Stat the loop device to see if there's a current association.
   memset(loop, 0, sizeof(struct loop_info64));
   if (-1 == lfd || ioctl(lfd, LOOP_GET_STATUS64, loop)) {
-    if (errno == ENXIO && (flags & (FLAG_a|FLAG_j))) return;
+    if (errno == ENXIO && (flags & (FLAG_a|FLAG_j))) goto done;
     if (errno != ENXIO || !file) {
       perror_msg("%s", device ? device : "-f");
       goto done;
@@ -106,12 +106,13 @@ static void loopback_setup(char *device, char *file)
     }
   // Associate file with this device?
   } else if (file) {
-    char *s = xrealpath(file);
+    char *s = xabspath(file, 1);
 
+    if (!s) perror_exit("file"); // already opened, but if deleted since...
     if (ioctl(lfd, LOOP_SET_FD, ffd)) perror_exit("%s=%s", device, file);
     loop->lo_offset = TT.offset;
     loop->lo_sizelimit = TT.size;
-    strncpy((char *)loop->lo_file_name, s, LO_NAME_SIZE);
+    xstrncpy((char *)loop->lo_file_name, s, LO_NAME_SIZE);
     s[LO_NAME_SIZE-1] = 0;
     if (ioctl(lfd, LOOP_SET_STATUS64, loop)) perror_exit("%s=%s", device, file);
     if (flags & FLAG_s) printf("%s", device);
@@ -179,10 +180,13 @@ void losetup_main(void)
   } else {
     char *file = (toys.optflags & (FLAG_d|FLAG_c)) ? NULL : toys.optargs[1];
 
-    if (!toys.optc || (file && toys.optc>1)) {
+    if (!toys.optc || (file && toys.optc != 2)) {
       toys.exithelp++;
-      perror_exit("needs 1 arg");
+      perror_exit("needs %d arg%s", 1+!!file, file ? "s" : "");
     }
-    for (s = toys.optargs; *s; s++) loopback_setup(*s, file);
+    for (s = toys.optargs; *s; s++) {
+      loopback_setup(*s, file);
+      if (file) break;
+    }
   }
 }

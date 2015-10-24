@@ -1,212 +1,152 @@
-/* umount.c -  umount filesystems.
+/* umount.c - Unmount a mount point.
  *
- * Copyright 2012 Ashwini Kumar <ak.ashwini@gmail.com>
+ * Copyright 2012 Rob Landley <rob@landley.net>
  *
- * Not in SUSv4.
+ * See http://refspecs.linuxfoundation.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/umount.html
+ *
+ * Note: -n (/etc/mtab) is obsolete, /proc/mounts replaced it. Neither chroot
+ * nor per-process mount namespaces can work sanely with mtab. The kernel
+ * tracks mount points now, a userspace application can't do so anymore.
 
-USE_UMOUNT(NEWTOY(umount, "varlfdt:", TOYFLAG_BIN))
+USE_UMOUNT(NEWTOY(umount, "ndDflrat*v[!na]", TOYFLAG_BIN|TOYFLAG_STAYROOT))
 
 config UMOUNT
   bool "umount"
   default y
   help
-    usage: umount [-varlfd] [-t fstypes] [dir...]
+    usage: umount [-a [-t TYPE[,TYPE...]]] [-vrfD] [DIR...]
 
-    -a  Unmount all file systems
-    -v  Verbose mode
-    -r  Try to remount devices as read-only if mount is busy
-    -l  Lazy umount (detach filesystem)
-    -f  Force umount (i.e., unreachable NFS server)
-    -d  Free loop device if it has been used
-    -t FSTYPE Filesystem types to be acted upon (comma separated)
+    Unmount the listed filesystems.
 
-    unmount the filesystem.
+    -a	Unmount all mounts in /proc/mounts instead of command line list
+    -D  Don't free loopback device(s).
+    -f  Force unmount.
+    -l  Lazy unmount (detach from filesystem now, close when last user does).
+    -n	Don't use /proc/mounts
+    -r  Remount read only if unmounting fails.
+    -t	Restrict "all" to mounts of TYPE (or use "noTYPE" to skip)
+    -v	Verbose
 */
 
 #define FOR_umount
 #include "toys.h"
-#include <sys/param.h>
-#include <linux/loop.h>
 
 GLOBALS(
-    char *types;
-    struct mtab_list *mnts;
-    int fflag;
+  struct arg_list *t;
+
+  char *types;
 )
 
-#define LOOPDEV_MAXLEN 64
-typedef enum { MNTANY, MNTON, MNTFROM } mntwhat;
+// todo (done?)
+//   borrow df code to identify filesystem?
+//   umount -a from fstab
+//   umount when getpid() not 0, according to fstab
+//   lookup mount: losetup -d, bind, file, block
+//   loopback delete
+//   fstab -o user
 
-static int checkvfsname(char *vfs_name, char **vfs_list)
-{   
-  int skipvfs = 0;
-  if (!vfs_list) return skipvfs;
-  while (*vfs_list) {
-    if (*vfs_list[0] == 'n' && *vfs_list[1] == 'o') skipvfs = 1;  
-    if (!strcmp(vfs_name, *vfs_list)) return (skipvfs);
-    ++vfs_list;
-  }
-  return (!skipvfs);
-}
+// TODO
+// swapon, swapoff
 
-static char **makevfslist(char *fslist)
-{   
-  char **av;
-  size_t i;
-  char *nextcp, *fsl;
+static void do_umount(char *dir, char *dev, int flags)
+{
+  // is it ok for this user to umount this mount?
+  if (CFG_TOYBOX_SUID && getuid()) {
+    struct mtab_list *mt = dlist_terminate(xgetmountlist("/etc/fstab"));
+    int len, user = 0;
 
-  if (!fslist) return NULL;
+    while (mt) {
+      struct mtab_list *mtemp = mt;
+      char *s;
 
-  fsl = xstrdup(fslist);
-  for (i = 0, nextcp = fsl; *nextcp; nextcp++)
-    if (*nextcp == ',') i++;
+      if (!strcmp(mt->dir, dir)) while ((s = comma_iterate(&mt->opts, &len))) {
+        if (len == 4 && strncmp(s, "user", 4)) user = 1;
+        else if (len == 6 && strncmp(s, "nouser", 6)) user = 0;  
+      }
 
-  av = xmalloc((i + 2) * sizeof(char *));
-  nextcp = fsl;
-  i = 0;
-  av[i++] = nextcp;
-  while ((nextcp = strchr(nextcp, ','))) {
-    *nextcp++ = '\0';
-    av[i++] = nextcp;
-  }
-  av[i++] = NULL;
-  return av;
-}   
-
-static int is_loop(char *dev)
-{        
-  struct stat st;
-
-  if (!stat(dev, &st) && S_ISBLK(st.st_mode)
-      && (major(st.st_rdev) == 7)) return 1;
-
-  return 0;  
-}        
-
-static int is_loop_mount(char* path, char *loopdev)
-{        
-  struct mtab_list *mnts = NULL;
-  struct mtab_list *mntlist;
-
-  mnts = TT.mnts;
-  if (!mnts) {
-    perror_msg("getmntinfo");
-    return 0;
-  }
-  for (mntlist = mnts; mntlist; mntlist = mntlist->next) {
-    if (is_loop(mntlist->device) && !strcmp(path, mntlist->dir)) {
-      strncpy(loopdev, mntlist->device, LOOPDEV_MAXLEN);
-      loopdev[LOOPDEV_MAXLEN-1] = '\0';
-      return 1;
+      mt = mt->next;
+      free(mtemp);
     }
-  }
-  return 0;
-}
 
-static char *getmntname(char *name, mntwhat what)
-{
-  struct mtab_list *mntlist, *mnts = NULL;
+    if (!user) {
+      error_msg("not root");
 
-  mnts = TT.mnts;
-  if (!mnts) {
-    perror_msg("getmntinfo");
-    return (NULL);
-  }
-  for (mntlist = mnts; mntlist; mntlist = mntlist->next) {
-    if (!strcmp(mntlist->device, name)
-        || !strcmp(mntlist->dir, name))
-      return ((what == MNTON)? mntlist->dir: mntlist->device);
-  }
-  return (NULL);
-}
-
-//  delete the setup loop device
-static int delete_loopdev(char *loopdev)
-{
-  int loop_fd = open(loopdev, O_RDONLY);
-  if (loop_fd < 0) {
-    perror_msg("%s: open loop device failed", loopdev);
-    return 1;
-  }  
-  ioctl(loop_fd, LOOP_CLR_FD, 0);
-  xclose(loop_fd);
-  return 0;
-} 
-
-static int umountfs(char *name, int raw)
-{
-  char *mntpt, rname[MAXPATHLEN], *dev = NULL, loopdev[LOOPDEV_MAXLEN];
-  int loop, status;
-
-  if (raw) mntpt = name;
-  else {
-    if (realpath(name, rname)) name = rname;
-    if (!(mntpt = getmntname(name, MNTON))) {
-      error_msg("%s: not currently mounted", name);
-      return (1);
+      return;
     }
   }
 
-  if (toys.optflags & FLAG_v) xprintf("unmount %s\n", mntpt);
+  if (!umount2(dir, flags)) {
+    if (toys.optflags & FLAG_v) xprintf("%s unmounted\n", dir);
 
-  loop = is_loop_mount(mntpt, loopdev);
-  status = umount(mntpt);
+    // Attempt to disassociate loopback device. This ioctl should be ignored
+    // for anything else, because lanana allocated ioctl range 'L' to loopback
+    if (dev && !(toys.optflags & FLAG_D)) {
+      int lfd = open(dev, O_RDONLY);
 
-  if (status && (TT.fflag)) status = umount2(mntpt, TT.fflag);
-
-  if (status) {
-    if (errno == EBUSY && toys.optflags & FLAG_r) {
-      //remount as read-only
-      if ((dev = getmntname(mntpt, MNTFROM))) {
-        if (mount(dev, mntpt, NULL, MS_REMOUNT|MS_RDONLY, NULL))
-          perror_msg("Can't remount %s read-only",dev);
-        else {
-          printf("%s busy - remounted read-only\n",dev);
-          return 0;
-        }
+      if (lfd != -1) {
+        // This is LOOP_CLR_FD, fetching it from headers is awkward
+        if (!ioctl(lfd, 0x4C01) && (toys.optflags & FLAG_v))
+          xprintf("%s cleared\n", dev);
+        close(lfd);
       }
     }
-    else perror_msg("can't umount %s",mntpt);
-    return 1;
+
+    return;
   }
-  if ((toys.optflags & FLAG_d) && loop) return delete_loopdev(loopdev);
-  return 0;
+
+  if (toys.optflags & FLAG_r) {
+    if (!mount("", dir, "", MS_REMOUNT|MS_RDONLY, "")) {
+      if (toys.optflags & FLAG_v) xprintf("%s remounted ro\n", dir);
+      return;
+    }
+  }
+
+  perror_msg("%s", dir);
 }
 
-
-void umount_main()
+void umount_main(void)
 {
-  int errs = 0, raw = 0, i =0;
-  struct mtab_list *mntlist, *mnts;
-  char **typelist = NULL;
+  char **optargs, *pm = "/proc/mounts";
+  struct mtab_list *mlsave = 0, *mlrev = 0, *ml;
+  int flags=0;
 
-  /* Start disks transferring immediately. */
-  sync();
+  if (!toys.optc && !(toys.optflags & FLAG_a))
+    error_exit("Need 1 arg or -a");
 
-  if (toys.optflags & FLAG_f) TT.fflag = MNT_FORCE;
-  if (toys.optflags & FLAG_l) TT.fflag = MNT_DETACH;
+  if (toys.optflags & FLAG_f) flags |= MNT_FORCE;
+  if (toys.optflags & FLAG_l) flags |= MNT_DETACH;
 
-  mnts = xgetmountlist();
-  TT.mnts = mnts;
+  // Load /proc/mounts and get a reversed list (newest first)
+  // We use the list both for -a, and to umount /dev/name or do losetup -d
+  if (!(toys.optflags & FLAG_n) && !access(pm, R_OK))
+    mlrev = dlist_terminate(mlsave = xgetmountlist(pm));
 
-  if (toys.optflags & FLAG_t) typelist = makevfslist(TT.types);
-
+  // Unmount all: loop through mounted filesystems, skip -t, unmount the rest
   if (toys.optflags & FLAG_a) {
-    if (!mnts) {
-      perror_msg("getmntinfo");
-      errs = 1;
+    char *typestr = 0;
+    struct arg_list *tal;
+    
+    for (tal = TT.t; tal; tal = tal->next) comma_collate(&typestr, tal->arg);
+    for (ml = mlrev; ml; ml = ml->prev)
+      if (mountlist_istype(ml, typestr)) do_umount(ml->dir, ml->device, flags);
+    if (CFG_TOYBOX_FREE) {
+      free(typestr);
+      llist_traverse(mlsave, free);
     }
-    for (errs = 0, mntlist = mnts; mntlist; mntlist = mntlist->next) {
-      if (checkvfsname(mntlist->type, typelist))
-        continue;
-      errs = umountfs(mntlist->dir, 1);
+  // TODO: under what circumstances do we umount non-absolute path?
+  } else for (optargs = toys.optargs; *optargs; optargs++) {
+    char *abs = xabspath(*optargs, 0);
+
+    for (ml = abs ? mlrev : 0; ml; ml = ml->prev) {
+      if (!strcmp(ml->dir, abs)) break;
+      if (!strcmp(ml->device, abs)) {
+        free(abs);
+        abs = ml->dir;
+        break;
+      }
     }
-  } else if (!toys.optc) {
-    toys.exithelp = 1;
-    error_exit("");
-  } else {
-    for (errs = 0, i = 0; toys.optargs[i]; i++)
-      errs = umountfs(toys.optargs[i], raw);
+
+    do_umount(abs ? abs : *optargs, ml ? ml->device : 0, flags);
+    if (ml && abs != ml->dir) free(abs);
   }
-  toys.exitval = errs;
 }

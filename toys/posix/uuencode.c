@@ -22,22 +22,13 @@ config UUENCODE
 
 void uuencode_main(void)
 {
-  char *p, *name = toys.optargs[toys.optc-1], buf[(76/4)*3];
+  char *name = toys.optargs[toys.optc-1], buf[(76/4)*3];
 
   int i, m = toys.optflags & FLAG_m, fd = 0;
 
   if (toys.optc > 1) fd = xopen(toys.optargs[0], O_RDONLY);
 
-  // base64 table
-
-  p = toybuf;
-  for (i = 'A'; i != ':'; i++) {
-    if (i == 'Z'+1) i = 'a';
-    if (i == 'z'+1) i = '0';
-    *(p++) = i;
-  }
-  *(p++) = '+';
-  *(p++) = '/';
+  base64_init(toybuf);
 
   xprintf("begin%s 744 %s\n", m ? "-base64" : "", name);
   for (;;) {

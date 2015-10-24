@@ -1,8 +1,8 @@
 /* hostid.c - Print the numeric identifier for the current host.
  *
- * Copyright 2013 Ranjan Kumar <ranjankumar.bth@gmail.com>
+ * Copyright 2015 Ranjan Kumar <ranjankumar.bth@gmail.com>
  *
- * Not in SUSv4.
+ * No Standard.
 
 USE_HOSTID(NEWTOY(hostid, ">0", TOYFLAG_USR|TOYFLAG_BIN))
 
@@ -14,12 +14,9 @@ config HOSTID
 
     Print the numeric identifier for the current host.
 */
-
+#define FOR_hostid
 #include "toys.h"
 
-/*
- * host id main function.
- */
 void hostid_main(void)
 {
   xprintf("%08lx\n", gethostid());

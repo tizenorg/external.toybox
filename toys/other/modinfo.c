@@ -1,14 +1,19 @@
 /* modinfo.c - Display module info
  *
  * Copyright 2012 Andre Renaud <andre@bluewatersys.com>
+ *
+ * TODO: cleanup
 
-USE_MODINFO(NEWTOY(modinfo, "<1F:0", TOYFLAG_BIN))
+USE_MODINFO(NEWTOY(modinfo, "<1b:k:F:0", TOYFLAG_BIN))
 
 config MODINFO
   bool "modinfo"
   default y
   help
-    usage: modinfo [-0] [-F field] [modulename...]
+    usage: modinfo [-0] [-b basedir] [-k kernrelease] [-F field] [modulename...]
+
+    Display module fields for all specified modules, looking in
+    <basedir>/lib/modules/<kernrelease>/ (kernrelease defaults to uname -r).
 */
 
 #define FOR_modinfo
@@ -16,41 +21,40 @@ config MODINFO
 
 GLOBALS(
   char *field;
+  char *knam;
+  char *base;
 
   long mod;
 )
 
-static char *modinfo_tags[] = {
-  "alias", "license", "description", "author", "firmware",
-  "vermagic", "srcversion", "intree", "parm", "depends",
-};
-
 static void output_field(char *field, char *value)
 {
-  int len;
-
-  if (TT.field && strcmp(TT.field, field)) return;
-
-  len = strlen(field);
-
-  if (TT.field) xprintf("%s", value);
-  else xprintf("%s:%*s%s", field, 15 - len, "", value);
+  if (!TT.field) xprintf("%s:%*c", field, 15-(int)strlen(field), ' ');
+  else if (strcmp(TT.field, field)) return;
+  xprintf("%s", value);
   xputc((toys.optflags & FLAG_0) ? 0 : '\n');
 }
 
-static void modinfo_file(struct dirtree *dir)
+static void modinfo_file(char *full_name)
 {
   int fd, len, i;
-  char *buf, *pos, *full_name;
+  char *buf = 0, *pos, *modinfo_tags[] = {
+    "alias", "license", "description", "author", "firmware",
+    "vermagic", "srcversion", "intree", "depends", "parm",
+    "parmtype",
+  };
 
-  full_name = dirtree_path(dir, NULL);
+  if (-1 != (fd = open(full_name, O_RDONLY))) {
+    len = fdlength(fd);
+    if (!(buf = mmap(0, len, PROT_READ, MAP_SHARED, fd, 0))) close(fd);
+  }
+
+  if (!buf) {
+    perror_msg("%s", full_name);
+    return;
+  } 
+
   output_field("filename", full_name);
-  fd = xopen(full_name, O_RDONLY);
-  free(full_name);
-
-  len = fdlength(fd);
-  if (!(buf = mmap(0, len, PROT_READ, MAP_SHARED, fd, 0)))
-    perror_exit("mmap %s", full_name);
 
   for (pos = buf; pos < buf+len; pos++) {
     if (*pos) continue;
@@ -84,7 +88,10 @@ static int check_module(struct dirtree *new)
       }
       if (s[len] || strcmp(new->name+len, ".ko")) break;
 
-      modinfo_file(new);
+      modinfo_file(s = dirtree_path(new, NULL));
+      free(s);
+
+      return DIRTREE_ABORT;
     }
   }
 
@@ -93,12 +100,19 @@ static int check_module(struct dirtree *new)
 
 void modinfo_main(void)
 {
-  struct utsname uts;
-
-  if (uname(&uts) < 0) perror_exit("bad uname");
-  sprintf(toybuf, "/lib/modules/%s", uts.release);
-
   for(TT.mod = 0; TT.mod<toys.optc; TT.mod++) {
-    dirtree_read(toybuf, check_module);
+    char *s = strstr(toys.optargs[TT.mod], ".ko");
+
+    if (s && !s[3]) modinfo_file(toys.optargs[TT.mod]);
+    else {
+      struct utsname uts;
+
+      if (uname(&uts) < 0) perror_exit("bad uname");
+      if (snprintf(toybuf, sizeof(toybuf), "%s/lib/modules/%s",
+          (toys.optflags & FLAG_b) ? TT.base : "",
+          (toys.optflags & FLAG_k) ? TT.knam : uts.release) >= sizeof(toybuf))
+            perror_exit("basedir/kernrelease too long");
+      dirtree_read(toybuf, check_module);
+    }
   }
 }

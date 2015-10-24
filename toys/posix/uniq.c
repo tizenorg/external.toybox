@@ -4,7 +4,7 @@
  *
  * See http://opengroup.org/onlinepubs/9699919799/utilities/uniq.html
 
-USE_UNIQ(NEWTOY(uniq, "f#s#w#zicdu", TOYFLAG_BIN))
+USE_UNIQ(NEWTOY(uniq, "f#s#w#zicdu", TOYFLAG_USR|TOYFLAG_BIN))
 
 config UNIQ
   bool "uniq"
@@ -113,6 +113,8 @@ void uniq_main(void)
   print_line(outfile, prevline);
 
   if (CFG_TOYBOX_FREE) {
+    if (outfile != stdout) fclose(outfile);
+    if (infile != stdin) fclose(infile);
     free(prevline);
     free(thisline);
   }

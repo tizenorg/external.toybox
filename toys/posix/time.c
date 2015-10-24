@@ -9,6 +9,7 @@ USE_TIME(NEWTOY(time, "<1^p", TOYFLAG_USR|TOYFLAG_BIN))
 config TIME
   bool "time"
   default y
+  depends on TOYBOX_FLOAT
   help
     usage: time [-p] COMMAND [ARGS...]
 
@@ -27,7 +28,7 @@ void time_main(void)
   struct timeval tv, tv2;
 
   gettimeofday(&tv, NULL);
-  if (!(pid = fork())) xexec(toys.optargs);
+  if (!(pid = xfork())) xexec(toys.optargs);
   else {
     int stat;
     struct rusage ru;

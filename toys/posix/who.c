@@ -9,11 +9,12 @@
  * Posix says to support many options (-abdHlmpqrstTu) but this
  * isn't aimed at minicomputers with modem pools.
 
-USE_WHO(NEWTOY(who, "a", TOYFLAG_BIN))
+USE_WHO(NEWTOY(who, "a", TOYFLAG_USR|TOYFLAG_BIN))
 
 config WHO
   bool "who"
   default y
+  depends on TOYBOX_UTMPX
   help
     usage: who
 

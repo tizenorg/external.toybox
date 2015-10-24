@@ -2,9 +2,14 @@
  *
  * See http://opengroup.org/onlinepubs/9699919799/utilities/cp.html
  *
- * TODO: sHLP
+ * Posix says "cp -Rf dir file" shouldn't delete file, but our -f does.
 
-USE_CP(NEWTOY(cp, "<2"USE_CP_MORE("rdavsln")"RHLPfip[-ni]", TOYFLAG_BIN))
+// options shared between mv/cp must be in same order (right to left)
+// for FLAG macros to work out right in shared infrastructure.
+
+USE_CP(NEWTOY(cp, "<2"USE_CP_PRESERVE("(preserve):;")"RHLPp"USE_CP_MORE("rdaslvnF(remove-destination)")"fi[-HLP"USE_CP_MORE("d")"]"USE_CP_MORE("[-ni]"), TOYFLAG_BIN))
+USE_MV(NEWTOY(mv, "<2"USE_CP_MORE("vnF")"fi"USE_CP_MORE("[-ni]"), TOYFLAG_BIN))
+USE_INSTALL(NEWTOY(install, "<1cdDpsvm:o:g:", TOYFLAG_USR|TOYFLAG_BIN))
 
 config CP
   bool "cp"
@@ -15,7 +20,8 @@ config CP
     Copy files from SOURCE to DEST.  If more than one SOURCE, DEST must
     be a directory.
 
-    -f	force copy by deleting destination file
+    -f	delete destination files we can't write to
+    -F	delete any existing destination file first (--remove-destination)
     -i	interactive, prompt before overwriting existing DEST
     -p	preserve timestamps, ownership, and permissions
     -R	recurse into subdirectories (DEST must be a directory)
@@ -24,11 +30,11 @@ config CP
     -P	Do not follow symlinks [default]
 
 config CP_MORE
-  bool "cp -rdavsl options"
+  bool "cp -adlnrsv options"
   default y
   depends on CP
   help
-    usage: cp [-rdavsl]
+    usage: cp [-adlnrsv]
 
     -a	same as -dpr
     -d	don't dereference symlinks
@@ -37,16 +43,83 @@ config CP_MORE
     -r	synonym for -R
     -s	symlink instead of copy
     -v	verbose
+
+config CP_PRESERVE
+  bool "cp --preserve support"
+  default y
+  depends on CP_MORE
+  help
+    usage: cp [--preserve=mota]
+
+    --preserve takes either a comma separated list of attributes, or the first
+    letter(s) of:
+
+            mode - permissions (ignore umask for rwx, copy suid and sticky bit)
+       ownership - user and group
+      timestamps - file creation, modification, and access times.
+             all - all of the above
+
+config MV
+  bool "mv"
+  default y
+  depends on CP
+  help
+    usage: mv [-fi] SOURCE... DEST"
+
+    -f	force copy by deleting destination file
+    -i	interactive, prompt before overwriting existing DEST
+
+config MV_MORE
+  bool
+  default y
+  depends on MV && CP_MORE
+  help
+    usage: mv [-vn]
+
+    -v	verbose
+    -n	no clobber (don't overwrite DEST)
+
+config INSTALL
+  bool "install"
+  default y
+  depends on CP && CP_MORE
+  help
+    usage: install [-dDpsv] [-o USER] [-g GROUP] [-m MODE] [SOURCE...] DEST
+
+    Copy files and set attributes.
+
+    -d	Act like mkdir -p
+    -D	Create leading directories for DEST
+    -g	Make copy belong to GROUP
+    -m	Set permissions to MODE
+    -o	Make copy belong to USER
+    -p	Preserve timestamps
+    -s	Call "strip -p"
+    -v	Verbose
 */
 
 #define FOR_cp
 #include "toys.h"
 
-// TODO: PLHlsd
-
 GLOBALS(
+  union {
+    struct {
+      // install's options
+      char *group;
+      char *user;
+      char *mode;
+    } i;
+    struct {
+      char *preserve;
+    } c;
+  };
+
   char *destname;
   struct stat top;
+  int (*callback)(struct dirtree *try);
+  uid_t uid;
+  gid_t gid;
+  int pflags;
 )
 
 // Callback from dirtree_read() for each file/directory under a source dir.
@@ -62,13 +135,13 @@ int cp_node(struct dirtree *try)
   if (!dirtree_notdotdot(try)) return 0;
 
   // If returning from COMEAGAIN, jump straight to -p logic at end.
-  if (S_ISDIR(try->st.st_mode) && try->data == -1) {
+  if (S_ISDIR(try->st.st_mode) && try->again) {
     fdout = try->extra;
     err = 0;
   } else {
 
     // -d is only the same as -r for symlinks, not for directories
-    if (S_ISLNK(try->st.st_mode) & (flags & FLAG_d)) flags |= FLAG_r;
+    if (S_ISLNK(try->st.st_mode) && (flags & FLAG_d)) flags |= FLAG_r;
 
     // Detect recursive copies via repeated top node (cp -R .. .) or
     // identical source/target (fun with hardlinks).
@@ -92,9 +165,13 @@ int cp_node(struct dirtree *try)
         error_msg("dir at '%s'", s = dirtree_path(try, 0));
         free(s);
         return 0;
+      } else if ((flags & FLAG_F) && unlinkat(cfd, catch, 0)) {
+        error_msg("unlink '%s'", catch);
+        return 0;
       } else if (flags & FLAG_n) return 0;
       else if (flags & FLAG_i) {
-        fprintf(stderr, "cp: overwrite '%s'", s = dirtree_path(try, 0));
+        fprintf(stderr, "%s: overwrite '%s'", toys.which->name,
+          s = dirtree_path(try, 0));
         free(s);
         if (!yesno("", 1)) return 0;
       }
@@ -102,7 +179,7 @@ int cp_node(struct dirtree *try)
 
     if (flags & FLAG_v) {
       char *s = dirtree_path(try, 0);
-      printf("cp '%s'\n", s);
+      printf("%s '%s'\n", toys.which->name, s);
       free(s);
     }
 
@@ -131,8 +208,9 @@ int cp_node(struct dirtree *try)
 
         if (!mkdirat(cfd, catch, try->st.st_mode | 0200) || errno == EEXIST)
           if (-1 != (try->extra = openat(cfd, catch, O_NOFOLLOW)))
-            if (!fstat(try->extra, &st2))
-              if (S_ISDIR(st2.st_mode)) return DIRTREE_COMEAGAIN;
+            if (!fstat(try->extra, &st2) && S_ISDIR(st2.st_mode))
+              return DIRTREE_COMEAGAIN
+                     | (DIRTREE_SYMFOLLOW*!!(toys.optflags&FLAG_L));
 
       // Hardlink
 
@@ -152,7 +230,7 @@ int cp_node(struct dirtree *try)
 
         if (*or->name == '/') dotdots = 0;
         if (dotdots) {
-          char *s2 = xmsprintf("% *c%s", 3*dotdots, ' ', s);
+          char *s2 = xmprintf("%*c%s", 3*dotdots, ' ', s);
           free(s);
           s = s2;
           while(dotdots--) {
@@ -190,41 +268,57 @@ int cp_node(struct dirtree *try)
         if (fdin < 0) {
           catch = try->name;
           break;
-        } else {
-          fdout = openat(cfd, catch, O_RDWR|O_CREAT|O_TRUNC, try->st.st_mode);
-          if (fdout >= 0) {
-            xsendfile(fdin, fdout);
-            err = 0;
-          }
-          close(fdin);
         }
+        fdout = openat(cfd, catch, O_RDWR|O_CREAT|O_TRUNC, try->st.st_mode);
+        if (fdout >= 0) {
+          xsendfile(fdin, fdout);
+          err = 0;
+        }
+        close(fdin);
       }
     } while (err && (flags & (FLAG_f|FLAG_n)) && !unlinkat(cfd, catch, 0));
   }
 
+  // Did we make a thing?
   if (fdout != -1) {
-    if (flags & (FLAG_a|FLAG_p)) {
-      struct timespec times[2];
+    int rc;
 
-      // Inability to set these isn't fatal, some require root access.
+    // Inability to set --preserve isn't fatal, some require root access.
 
-      times[0] = try->st.st_atim;
-      times[1] = try->st.st_mtim;
+    // ownership
+    if (TT.pflags & 2) {
 
+      // permission bits already correct for mknod and don't apply to symlink
       // If we can't get a filehandle to the actual object, use racy functions
-      if (fdout == AT_FDCWD) {
-        fchownat(cfd, catch, try->st.st_uid, try->st.st_gid,
-                 AT_SYMLINK_NOFOLLOW);
-        utimensat(cfd, catch, times, AT_SYMLINK_NOFOLLOW);
-        // permission bits already correct for mknod, don't apply to symlink
-      } else {
-        fchown(fdout, try->st.st_uid, try->st.st_gid);
-        futimens(fdout, times);
-        fchmod(fdout, try->st.st_mode);
+      if (fdout == AT_FDCWD)
+        rc = fchownat(cfd, catch, try->st.st_uid, try->st.st_gid,
+                      AT_SYMLINK_NOFOLLOW);
+      else rc = fchown(fdout, try->st.st_uid, try->st.st_gid);
+      if (rc) {
+        char *pp;
+
+        perror_msg("chown '%s'", pp = dirtree_path(try, 0));
+        free(pp);
       }
     }
 
-    if (fdout != AT_FDCWD) xclose(fdout);
+    // timestamp
+    if (TT.pflags & 4) {
+      struct timespec times[] = {try->st.st_atim, try->st.st_mtim};
+
+      if (fdout == AT_FDCWD) utimensat(cfd, catch, times, AT_SYMLINK_NOFOLLOW);
+      else futimens(fdout, times);
+    }
+
+    // mode comes last because other syscalls can strip suid bit
+    if (fdout != AT_FDCWD) {
+      if (TT.pflags & 1) fchmod(fdout, try->st.st_mode);
+      xclose(fdout);
+    }
+
+    if (CFG_MV && toys.which->name[0] == 'm')
+      if (unlinkat(tfd, try->name, S_ISDIR(try->st.st_mode) ? AT_REMOVEDIR :0))
+        err = "%s";
   }
 
   if (err) perror_msg(err, catch);
@@ -233,27 +327,136 @@ int cp_node(struct dirtree *try)
 
 void cp_main(void)
 {
-  char *destname = toys.optargs[--toys.optc];
+  char *destname = toys.optargs[--toys.optc],
+       *preserve[] = {"mode", "ownership", "timestamps"};
   int i, destdir = !stat(destname, &TT.top) && S_ISDIR(TT.top.st_mode);
 
   if (toys.optc>1 && !destdir) error_exit("'%s' not directory", destname);
 
-  if (toys.optflags & (FLAG_a|FLAG_p)) umask(0);
+  if (toys.optflags & (FLAG_a|FLAG_p)) {
+    TT.pflags = 7; // preserve=mot
+    umask(0);
+  }
+  if (CFG_CP_PRESERVE && TT.c.preserve) {
+    char *pre = xstrdup(TT.c.preserve), *s;
+
+    if (comma_scan(pre, "all", 1)) TT.pflags = ~0;
+    for (i=0; i<ARRAY_LEN(preserve); i++)
+      if (comma_scan(pre, preserve[i], 1)) TT.pflags |= 1<<i;
+    if (*pre) {
+
+      // Try to interpret as letters, commas won't set anything this doesn't.
+      for (s = TT.c.preserve; *s; s++) {
+        for (i=0; i<ARRAY_LEN(preserve); i++)
+          if (*s == *preserve[i]) TT.pflags |= 1<<i;
+        if (i == ARRAY_LEN(preserve)) {
+          if (*s == 'a') TT.pflags = ~0;
+          else break;
+        }
+      }
+
+      if (*s) error_exit("bad --preserve=%s", pre);
+    }
+    free(pre);
+  }
+  if (!TT.callback) TT.callback = cp_node;
 
   // Loop through sources
-
   for (i=0; i<toys.optc; i++) {
     struct dirtree *new;
     char *src = toys.optargs[i];
+    int rc = 1;
+
+    if (destdir) TT.destname = xmprintf("%s/%s", destname, basename(src));
+    else TT.destname = destname;
+
+    errno = EXDEV;
+    if (CFG_MV && toys.which->name[0] == 'm') {
+      if (!(toys.optflags & FLAG_f)) {
+        struct stat st;
+
+        // Technically "is writeable" is more complicated (022 is not writeable
+        // by the owner, just everybody _else_) but I don't care.
+        if (!stat(TT.destname, &st)
+          && ((toys.optflags & FLAG_i) || !(st.st_mode & 0222)))
+        {
+          fprintf(stderr, "%s: overwrite '%s'", toys.which->name, TT.destname);
+          if (!yesno("", 1)) rc = 0;
+          else unlink(src);
+        }
+      }
+
+      if (rc) rc = rename(src, TT.destname);
+    }
 
     // Skip nonexistent sources
-    if (!(new = dirtree_add_node(0, src, !(toys.optflags & (FLAG_d|FLAG_a)))))
-      perror_msg("bad '%s'", src);
-    else {
-      if (destdir) TT.destname = xmsprintf("%s/%s", destname, basename(src));
-      else TT.destname = destname;
-      dirtree_handle_callback(new, cp_node);
-      if (destdir) free(TT.destname);
+    if (rc) {
+      if (errno!=EXDEV ||
+        !(new = dirtree_start(src, toys.optflags&(FLAG_H|FLAG_L))))
+          perror_msg("bad '%s'", src);
+      else dirtree_handle_callback(new, TT.callback);
     }
+    if (destdir) free(TT.destname);
   }
+}
+
+void mv_main(void)
+{
+  toys.optflags |= FLAG_d|FLAG_p|FLAG_R;
+
+  cp_main();
+}
+
+#define CLEANUP_cp
+#define FOR_install
+#include <generated/flags.h>
+
+static int install_node(struct dirtree *try)
+{
+  if (TT.i.mode) try->st.st_mode = string_to_mode(TT.i.mode, try->st.st_mode);
+  if (TT.i.group) try->st.st_gid = TT.gid;
+  if (TT.i.user) try->st.st_uid = TT.uid;
+
+  // Always returns 0 because no -r
+  cp_node(try);
+
+  // No -r so always one level deep, so destname as set by cp_node() is correct
+  if (toys.optflags & FLAG_s)
+    if (xrun((char *[]){"strip", "-p", TT.destname, 0})) toys.exitval = 1;
+
+  return 0;
+}
+
+void install_main(void)
+{
+  char **ss;
+  int flags = toys.optflags;
+
+  if (flags & FLAG_d) {
+    for (ss = toys.optargs; *ss; ss++) {
+      if (mkpathat(AT_FDCWD, *ss, 0777, 3)) perror_msg("%s", *ss);
+      if (flags & FLAG_v) printf("%s\n", *ss);
+    }
+
+    return;
+  }
+
+  if (toys.optflags & FLAG_D) {
+    TT.destname = toys.optargs[toys.optc-1];
+    if (mkpathat(AT_FDCWD, TT.destname, 0, 2))
+      perror_exit("-D '%s'", TT.destname);
+    if (toys.optc == 1) return;
+  }
+  if (toys.optc < 2) error_exit("needs 2 args");
+
+  // Translate flags from install to cp
+  toys.optflags = 4;  // Force cp's FLAG_F
+  if (flags & FLAG_v) toys.optflags |= 8; // cp's FLAG_v
+  if (flags & (FLAG_p|FLAG_o|FLAG_g)) toys.optflags |= 512; // cp's FLAG_p
+
+  if (TT.i.user) TT.uid = xgetpwnamid(TT.i.user)->pw_uid;
+  if (TT.i.group) TT.gid = xgetgrnamid(TT.i.group)->gr_gid;
+
+  TT.callback = install_node;
+  cp_main();
 }

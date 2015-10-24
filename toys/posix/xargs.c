@@ -3,6 +3,8 @@
  * Copyright 2011 Rob Landley <rob@landley.net>
  *
  * See http://opengroup.org/onlinepubs/9699919799/utilities/xargs.html
+ *
+ * TODO: Rich's whitespace objection, env size isn't fixed anymore.
 
 USE_XARGS(NEWTOY(xargs, "^I:E:L#ptxrn#<1s#0", TOYFLAG_USR|TOYFLAG_BIN))
 
@@ -25,6 +27,14 @@ config XARGS
     #-r	Don't run command with empty input
     #-L	Max number of lines of input per command
     -E	stop at line matching string
+
+config XARGS_PEDANTIC
+  bool "TODO xargs pedantic posix compatability"
+  default n
+  depends on XARGS
+  help
+    This version supports insane posix whitespace handling rendered obsolete
+    by -0 mode.
 */
 
 #define FOR_xargs
@@ -98,9 +108,9 @@ static char *handle_entries(char *data, char **entry)
 
 void xargs_main(void)
 {
-  struct double_list *dlist = NULL;
+  struct double_list *dlist = NULL, *dtemp;
   int entries, bytes, done = 0, status;
-  char *data = NULL;
+  char *data = NULL, **out;
 
   if (!(toys.optflags & FLAG_0)) TT.delim = '\n';
 
@@ -116,8 +126,6 @@ void xargs_main(void)
 
   // Loop through exec chunks.
   while (data || !done) {
-    char **out;
-
     TT.entries = 0;
     TT.bytes = bytes;
 
@@ -152,25 +160,22 @@ void xargs_main(void)
     if (data && !TT.entries) error_exit("argument too long");
     out = xzalloc((entries+TT.entries+1)*sizeof(char *));
 
-    if (dlist) {
-      struct double_list *dtemp;
+    // Fill out command line to exec
+    memcpy(out, toys.optargs, entries*sizeof(char *));
+    TT.entries = 0;
+    TT.bytes = bytes;
+    if (dlist) dlist->prev->next = 0;
+    for (dtemp = dlist; dtemp; dtemp = dtemp->next)
+      handle_entries(dtemp->data, out+entries);
 
-      // Fill out command line to exec
-      memcpy(out, toys.optargs, entries*sizeof(char *));
-      TT.entries = 0;
-      TT.bytes = bytes;
-      dlist->prev->next = 0;
-      for (dtemp = dlist; dtemp; dtemp = dtemp->next)
-        handle_entries(dtemp->data, out+entries);
-    }
-    pid_t pid=fork();
+    pid_t pid=xfork();
     if (!pid) {
       xclose(0);
       open("/dev/null", O_RDONLY);
       xexec(out);
     }
     waitpid(pid, &status, 0);
-    status = WEXITSTATUS(status);
+    status = WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status)+127;
 
     // Abritrary number of execs, can't just leak memory each time...
     while (dlist) {

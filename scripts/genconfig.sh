@@ -7,27 +7,94 @@ mkdir -p generated
 
 source configure
 
+probecc()
+{
+  ${CROSS_COMPILE}${CC} $CFLAGS -xc -o /dev/null $1 -
+}
+
+# Probe for a single config symbol with a "compiles or not" test.
+# Symbol name is first argument, flags second, feed C file to stdin
+probesymbol()
+{
+  probecc $2 2>/dev/null && DEFAULT=y || DEFAULT=n
+  rm a.out 2>/dev/null
+  echo -e "config $1\n\tbool" || exit 1
+  echo -e "\tdefault $DEFAULT\n" || exit 1
+}
+
 probeconfig()
 {
-  # Probe for container support on target
+  > generated/cflags
+  # llvm produces its own really stupid warnings about things that aren't wrong,
+  # and although you can turn the warning off, gcc reacts badly to command line
+  # arguments it doesn't understand. So probe.
+  [ -z "$(probecc -Wno-string-plus-int <<< \#warn warn 2>&1 | grep string-plus-int)" ] &&
+    echo -Wno-string-plus-int >> generated/cflags
 
-  echo -e "# container support\nconfig TOYBOX_CONTAINER\n\tbool" || return 1
-  ${CROSS_COMPILE}${CC} $CFLAGS -xc -o /dev/null - 2>/dev/null << EOF
+  # Probe for container support on target
+  probesymbol TOYBOX_CONTAINER << EOF
     #include <linux/sched.h>
     int x=CLONE_NEWNS|CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET;
 
     int main(int argc, char *argv[]) { return unshare(x); }
 EOF
-  [ $? -eq 0 ] && DEFAULT=y || DEFAULT=n
-  rm a.out 2>/dev/null
-  echo -e "\tdefault $DEFAULT\n" || return 1
+
+  probesymbol TOYBOX_FIFREEZE -c << EOF
+    #include <linux/fs.h>
+    #ifndef FIFREEZE
+    #error nope
+    #endif
+EOF
+
+  # Work around some uClibc limitations
+  probesymbol TOYBOX_ICONV -c << EOF
+    #include "iconv.h"
+EOF
+  probesymbol TOYBOX_FALLOCATE << EOF
+    #include <fcntl.h>
+
+    int main(int argc, char *argv[]) { return posix_fallocate(0,0,0); }
+EOF
+  
+  # Android and some other platforms miss utmpx
+  probesymbol TOYBOX_UTMPX -c << EOF
+    #include <utmpx.h>
+    #ifndef BOOT_TIME
+    #error nope
+    #endif
+    int main(int argc, char *argv[]) {
+      struct utmpx *a; 
+      if (0 != (a = getutxent())) return 0;
+      return 1;
+    }
+EOF
+
+  # Android is missing shadow.h
+  probesymbol TOYBOX_SHADOW -c << EOF
+    #include <shadow.h>
+    int main(int argc, char *argv[]) {
+      struct spwd *a = getspnam("root"); return 0;
+    }
+EOF
+
+  # Some commands are android-specific
+  probesymbol TOYBOX_ON_ANDROID -c << EOF
+    #ifndef __ANDROID__
+    #error nope
+    #endif
+EOF
+
+  # nommu support
+  probesymbol TOYBOX_FORK << EOF
+    #include <unistd.h>
+    int main(int argc, char *argv[]) { return fork(); }
+EOF
 }
 
 genconfig()
 {
-  # I could query the directory here, but I want to control the order
-  # and capitalization in the menu
-  for j in toys/*/README
+  # Reverse sort puts posix first, examples last.
+  for j in $(ls toys/*/README | sort -r)
   do
     DIR="$(dirname "$j")"
 
@@ -49,33 +116,5 @@ genconfig()
   done
 }
 
-headerprobes()
-{
-  ${CROSS_COMPILE}${CC} $CFLAGS -xc -o /dev/null - 2>/dev/null << EOF
-    #include <fcntl.h>
-    #ifndef O_NOFOLLOW
-    #error posix 2008 was a while ago now
-    #endif
-EOF
-  if [ $? -ne 0 ]
-  then
-    rm -f a.out
-    ${CROSS_COMPILE}${CC} $CFLAGS -xc - 2>/dev/null << EOF
-      #include <stdio.h>
-      #include <sys/types.h>
-      #include <asm/fcntl.h>
-
-      int main(int argc, char *argv[])
-      {
-        printf("0x%x\n", O_NOFOLLOW);
-      }
-EOF
-    X=$(./a.out) 2>/dev/null
-    rm -f a.out
-    echo "#define O_NOFOLLOW ${X:-0}"
-  fi
-}
-
 probeconfig > generated/Config.probed || rm generated/Config.probed
 genconfig > generated/Config.in || rm generated/Config.in
-headerprobes > generated/portability.h || rm generated/portability.h

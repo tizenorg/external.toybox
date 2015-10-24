@@ -1,6 +1,11 @@
 /* chroot.c - Run command in new root directory.
  *
  * Copyright 2007 Rob Landley <rob@landley.net>
+ *
+ * TODO: The test for root is "==" so root can trivially escape a chroot by
+ * moving it below cwd, ala mkdir("sub"); chroot("sub"); chdir("../../../..")
+ * The container guys use pivot_root() to deal with this, which does actually
+ * edit mount tree. (New option? Kernel patch?)
 
 USE_CHROOT(NEWTOY(chroot, "^<1", TOYFLAG_USR|TOYFLAG_SBIN))
 
@@ -18,6 +23,8 @@ config CHROOT
 void chroot_main(void)
 {
   char *binsh[] = {"/bin/sh", "-i", 0};
+
   if (chdir(*toys.optargs) || chroot(".")) perror_exit("%s", *toys.optargs);
-  xexec(toys.optargs[1] ? toys.optargs+1 : binsh);
+  if (toys.optargs[1]) xexec(toys.optargs+1);
+  else xexec(binsh);
 }

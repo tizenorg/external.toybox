@@ -5,8 +5,26 @@
 
 #include "toys.h"
 
+// Callback function to free data pointer of double_list or arg_list
+
+void llist_free_arg(void *node)
+{
+  struct arg_list *d = node;
+
+  free(d->arg);
+  free(d);
+}
+
+void llist_free_double(void *node)
+{
+  struct double_list *d = node;
+
+  free(d->data);
+  free(d);
+}
+
 // Call a function (such as free()) on each element of a linked list.
-void llist_traverse(void *list, void (*using)(void *data))
+void llist_traverse(void *list, void (*using)(void *node))
 {
   void *old = list;
 
@@ -33,6 +51,19 @@ void *llist_pop(void *list)
   return (void *)next;
 }
 
+void *dlist_pop(void *list)
+{
+  struct double_list **pdlist = (struct double_list **)list, *dlist = *pdlist;
+
+  if (dlist->next == dlist) *pdlist = 0;
+  else {
+    dlist->next->prev = dlist->prev;
+    dlist->prev->next = *pdlist = dlist->next;
+  }
+
+  return dlist;
+}
+
 void dlist_add_nomalloc(struct double_list **list, struct double_list *new)
 {
   if (*list) {
@@ -53,4 +84,18 @@ struct double_list *dlist_add(struct double_list **list, char *data)
   dlist_add_nomalloc(list, new);
 
   return new;
+}
+
+// Terminate circular list for traversal in either direction. Returns end *.
+void *dlist_terminate(void *list)
+{
+  struct double_list *end = list;
+
+  if (!list) return 0;
+
+  end = end->prev;
+  end->next->prev = 0;
+  end->next = 0;
+
+  return end;
 }

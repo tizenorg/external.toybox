@@ -1,390 +1,141 @@
 /* printf.c - Format and Print the data.
  *
- * Copyright 2012 Sandeep Sharma <sandeep.jack2756@gmail.com>
+ * Copyright 2014 Sandeep Sharma <sandeep.jack2756@gmail.com>
+ * Copyright 2014 Kyungwan Han <asura321@gmail.com>
  *
  * See http://pubs.opengroup.org/onlinepubs/9699919799/utilities/printf.html
+ *
+ * todo: *m$ ala printf("%1$d:%2$.*3$d:%4$.*3$d\n", hour, min, precision, sec);
 
-USE_PRINTF(NEWTOY(printf, "<1", TOYFLAG_USR|TOYFLAG_BIN))
+USE_PRINTF(NEWTOY(printf, "<1?^", TOYFLAG_USR|TOYFLAG_BIN))
 
 config PRINTF 
-    bool "printf"
-    default y
-    help
-    usage: printf Format [Arguments..]
+  bool "printf"
+  default y
+  help
+    usage: printf FORMAT [ARGUMENT...]
     
-    Format and print ARGUMENT(s) according to FORMAT.
-    Format is 'C' control output as 'C' printf.
+    Format and print ARGUMENT(s) according to FORMAT, using C printf syntax
+    (% escapes for cdeEfgGiosuxX, \ escapes for abefnrtv0 or \OCTAL or \xHEX).
 */
 
 #define FOR_printf
 #include "toys.h"
 
-GLOBALS(
-  char *hv_w;
-  char *hv_p;
-  int encountered;
-)
+// Detect matching character (return true/false) and advance pointer if match.
+static int eat(char **s, char c)
+{
+  int x = (**s == c);
 
-/*
- * Calculate width and precision from format string,
- */
-static int find_w_p()                      //Handle width and prec.
-{
-  char *ptr, *str;
-  errno = 0;
-  str = *toys.optargs;
-  if(*str == '-') str++;
-  long value = strtol(str, &ptr, 10);
-  if(errno) perror_msg("Not a valid num %s, %d", str, errno);
-  if(ptr && (*ptr != '\0' || ptr == (str))) perror_msg("Not a valid num %s", *toys.optargs);
-  if(*--str == '-') return (int)(-1 * value);
-  else return value;
-}
-/*
- * Set have_width and have_prec global variables.
- */
-static void set_w_p(char *start)              
-{
-  TT.hv_p = NULL;
-  TT.hv_w = NULL;
-  TT.hv_p = strstr(start, ".*");        
-  TT.hv_w = strchr(start, '*');        
-  if((TT.hv_w-1) == TT.hv_p) TT.hv_w = NULL;       //pitfall: handle diff b/w * and .*
-}
-/*
- * Add ll to Interger formats and L to floating point
- * as we have to handle max. possible given value.
- */
-static char* get_format(char *f)                
-{
-  int len = strlen(f);
-  char last = f[len - 1];
-  f[len - 1] = '\0';
-  char *post = "";
-  if(strchr("diouxX", last)) post = "ll";  // add ll to integer modifier.
-  else if(strchr("feEgG", last)) post = "L"; // add L to float modifier.
-  return xmsprintf("%s%s%c", f, post, last);
-}
-/*
- * Print the long values with width and prec taken 
- * care of.
- */
-static void print_long(char *format, long long llong_value, int p, int w)
-{
-  if(!TT.hv_w) {
-    if(!TT.hv_p) printf(format,llong_value);
-    else printf(format,p,llong_value);
-  }
-  else {
-    if(!TT.hv_p) printf(format,w,llong_value);
-    else printf(format,w,p,llong_value);
-  }
-}
-/*
- * Print the arguments with corresponding conversion and 
- * width and precision.
- */
-static void print(char *fmt, int w, int p, int l)
-{
-  char *endptr = NULL;
-  char *ptr = (fmt+l-1);
-  long long llong_value;
-  long double double_value;
-  char *format = NULL;
-  errno = 0;
-  switch(*ptr) {
-    case'd': /*FALL_THROUGH*/
-    case'i':
-      if(*toys.optargs != NULL) {  
-        if(**toys.optargs == '\'' || **toys.optargs == '"') 
-          llong_value = *((*toys.optargs) + 1);
-        else {
-          llong_value = strtoll(*toys.optargs, &endptr, 0);
-          if(errno) { 
-            perror_msg("Invalid num %s", *toys.optargs);
-            llong_value = 0;
-          }
-          else {
-            if(endptr && (*endptr != '\0' || endptr == (*toys.optargs))) {
-              perror_msg("Not a valid num %s",*toys.optargs);
-              llong_value = 0;
-            }
-          }
-        }
-      }
-      else llong_value = 0;
+  if (x) ++*s;
 
-      format = get_format(fmt);
-      print_long(format, llong_value, p, w);
-      break;
-    case'o': /*FALL_THROUGH*/
-    case'u': /*FALL_THROUGH*/
-    case'x': /*FALL_THROUGH*/
-    case'X':
-      if(*toys.optargs != NULL) {
-        if(**toys.optargs == '\'' || **toys.optargs == '"')
-          llong_value = *((*toys.optargs) + 1);
-        else {
-          llong_value = strtoll(*toys.optargs, &endptr, 0);
-          if(errno) {
-            perror_msg("Invalid num %s", *toys.optargs);
-            llong_value = 0;
-          }
-          else {
-            if(endptr && (*endptr != '\0' || endptr == (*toys.optargs))) {
-              perror_msg("Not a valid num %s", *toys.optargs);
-              llong_value = 0;
-            }
-          }
-        }
-      }
-      else llong_value = 0;
-
-      format = get_format(fmt);
-      print_long(format, llong_value, p, w);
-      break;
-    case'g': /*FALL_THROUGH*/
-    case'e': /*FALL_THROUGH*/
-    case'E': /*FALL_THROUGH*/
-    case'G': /*FALL_THROUGH*/
-    case'f':
-      if(*toys.optargs != NULL) {
-        double_value = strtold(*toys.optargs, &endptr);
-        if(*endptr != '\0' || endptr == *toys.optargs) {
-          perror_msg("Not a valid num %s", *toys.optargs);
-          double_value = 0;
-        }
-      }
-      else double_value = 0;
-
-      format = get_format(fmt);
-      if(!TT.hv_w) {
-        if(!TT.hv_p) printf(format, double_value);
-        else printf(format, p, double_value);
-      }
-      else {
-        if(!TT.hv_p) printf(format, w, double_value);
-        else printf(format, w, p, double_value);
-      }
-      break;
-    case's':
-      if(!TT.hv_w) {
-        if(!TT.hv_p) printf(fmt, (*toys.optargs ? *toys.optargs : ""));
-        else printf(fmt, p, (*toys.optargs ? *toys.optargs : ""));
-      }
-      else {
-        if(!TT.hv_p) printf(fmt, w, (*toys.optargs ? *toys.optargs : ""));
-        else printf(fmt,w,p,(*toys.optargs ? *toys.optargs : ""));
-      }
-      break;
-    case'c':
-      printf(fmt, (*toys.optargs ? **toys.optargs : '\0'));
-      break;
-  }
-  free(format);
-  format = NULL;
+  return x;
 }
-/*
- * Handle the escape sequences. 
- */
+
+// Parse escape sequences.
 static int handle_slash(char **esc_val)
 {
   char *ptr = *esc_val;
-  unsigned  base = 0;
-  unsigned num = 0;
-  int esc_length = 0;
-  unsigned result = 0, count = 0;
-  if(*ptr == 'x') {
-    ptr++;
-    esc_length++; // Hexadecimal escape sequence have only 1 or 2 digits, xHH.
-    base = 16;
-  }
-  else if(isdigit(*ptr)) base = 8;  // Octal escape sequence have 1,2 or 3 digits, xHHH. Leading "0" (\0HHH) we are ignoring.
+  int len, base = 0;
+  unsigned result = 0, num;
 
-  while(esc_length < 3 && base != 0) {
+  if (*ptr == 'c') xexit();
+
+  // 0x12 hex escapes have 1-2 digits, \123 octal escapes have 1-3 digits.
+  if (eat(&ptr, 'x')) base = 16;
+  else if (*ptr >= '0' && *ptr <= '8') base = 8;
+  len = (char []){0,3,2}[base/8];
+
+  // Not a hex or octal escape? (This catches trailing \)
+  if (!len) {
+    if (!(result = unescape(*ptr))) result = '\\';
+    else ++*esc_val;
+
+    return result;
+  }
+
+  while (len) {
     num = tolower(*ptr) - '0';
-    if(num > 10) num += ('0' - 'a' + 10);
-    if(num >= base) { 
-      if(base == 16) {
-        esc_length--;
-        if(esc_length == 0) { // Invalid hex values eg. /xvd, print it as it is /xvd
-          result = '\\';
-          ptr--;
-        }
+    if (num >= 'a'-'0') num += '0'-'a'+10;
+    if (num >= base) {
+      // Don't parse invalid hex value ala "\xvd", print it verbatim
+      if (base == 16 && len == 2) {
+        ptr--;
+        result = '\\';
       }
       break;
     }
-    esc_length++;
-    result = count * base + num;
-    count = result;
+    result = (result*base)+num;
     ptr++;
-  }
-  if(base != 0) {
-    ptr--;
-    *esc_val = ptr;
-    return (char)result;
-  }
-  else {
-    switch(*ptr) {
-      case 'n': 
-        result = '\n';
-        break;
-      case 't': 
-        result = '\t';
-        break;
-      case 'e': 
-        result = (char)27;
-        break;
-      case 'b': 
-        result = '\b';
-        break;
-      case 'a': 
-        result = '\a';
-        break;
-      case 'f': 
-        result = '\f';
-        break;
-      case 'v': 
-        result = '\v';
-        break;
-      case 'r': 
-        result = '\r';
-        break;
-      case '\\': 
-        result = '\\';
-        break;
-      default :
-        result = '\\';
-        ptr--; // Let pointer pointing to / we will increment after returning.
-        break;
-    }
+    len--;
   }
   *esc_val = ptr;
-  return (char)result;
-}
-/*
- * Handle "%b" option with '\' interpreted.
- */
-static void print_esc_str(char *str)              
-{
-  while(*str != '\0') {
-    if(*str == '\\') {
-      str++; // Go to escape char     
-      xputc(handle_slash(&str)); //print corresponding char
-      str++;          
-    }
-    else xputc(*str++);
-  }
-}
-/*
- * Prase the format string and print.
- */
-static void parse_print(char *f)
-{
-  char *start, *p;
-  char format_specifiers[] = "diouxXfeEgGcs";
-  int len = 0;
-  int width = 0;
-  int prec = 0;
 
-  while(*f) {
-    switch(*f) {
-      case '%':
-        start = f++;
-        len++;
-        if(*f == '%') {
-          xputc('%');
-          break;
-        }
-        if(*f == 'b') {
-          if(*toys.optargs) {
-            print_esc_str(*toys.optargs);
-            TT.encountered = 1;
-          }
-          else print_esc_str("");
-          if(*toys.optargs) toys.optargs++;
-          break;
-        }
-        if(strchr("-+# ", *f)) {            //Just consume -+# printf will take care.
-          f++;
-          len++;
-        }
-        if(*f == '*') {  
-          f++;
-          len++;
-          if(*toys.optargs != NULL) {
-            width = find_w_p();
-            toys.optargs++;
-          }
-        }
-        else { 
-          while(isdigit(*f)) {
-            f++;
-            len++;
-          }
-        }
-        if(*f == '.') {
-          f++;
-          len++;
-          if(*f == '*') {
-            f++;
-            len++;
-            if(*toys.optargs != NULL) {
-              prec = find_w_p();
-              toys.optargs++;
-            }
-          }
-          else {
-            while(isdigit(*f)) {
-              f++;
-              len++;
-            }
-          }
-        }
-        p = strchr(format_specifiers, *f);
-        if(p == NULL) {
-          perror_exit("Missing OR Invalid format specifier");
-          return;
-        }
-        else {
-          len++;
-          set_w_p(start);
-          p = xmalloc(len+1);
-          memcpy(p, start, len);
-          p[len] = '\0';
-          print(p, width, prec, len);
-          if(*toys.optargs) toys.optargs++;
-          free(p);
-          p = NULL;
-        } 
-        TT.encountered = 1;
-        break;
-      case'\\':
-        if(f[1]) {
-          if(*++f == 'c') exit(0); //Got '\c', so no further output  
-          xputc(handle_slash(&f));
-        }
-        else xputc(*f);
-        break;
-      default:
-        xputc(*f);
-        break;
-    }
-    f++;
-    len = 0;
-  }
-  return;
+  return result;
 }
-/*
- * Printf main function.
- */
+
 void printf_main(void)
 {
-  char *format = NULL;
-  TT.encountered = 0;
-  format = *toys.optargs;
-  toys.optargs++;
-  parse_print(format); //printf acc. to format..
-  while((*toys.optargs != NULL) && TT.encountered) parse_print(format); //Re-use FORMAT arg as necessary to convert all given ARGS.
-  xflush();
+  char **arg = toys.optargs+1;
+
+  // Repeat format until arguments consumed
+  for (;;) {
+    int seen = 0;
+    char *f = *toys.optargs;
+
+    // Loop through characters in format
+    while (*f) {
+      if (eat(&f, '\\')) putchar(handle_slash(&f));
+      else if (!eat(&f, '%') || *f == '%') putchar(*f++);
+
+      // Handle %escape
+      else {
+        char c, *end = 0, *aa, *to = toybuf;
+        int wp[] = {0,-1}, i = 0;
+
+        // Parse width.precision between % and type indicator.
+        *to++ = '%';
+        while (strchr("-+# '0", *f) && (to-toybuf)<10) *to++ = *f++;
+        for (;;) {
+          if (eat(&f, '*')) {
+            if (*arg) wp[i] = atolx(*arg++);
+          } else while (*f >= '0' && *f <= '9') wp[i] = (wp[i]*10)+(*f++)-'0';
+          if (i++ || !eat(&f, '.')) break;
+          wp[1] = 0;
+        }
+        c = *f++;
+        seen = sprintf(to, "*.*%c", c);;
+        errno = 0;
+        aa = *arg ? *arg++ : "";
+
+        // Output %esc using parsed format string
+        if (c == 'b') {
+          while (*aa) putchar(eat(&aa, '\\') ? handle_slash(&aa) : *aa++);
+
+          continue;
+        } else if (c == 'c') printf(toybuf, wp[0], wp[1], *aa);
+        else if (c == 's') printf(toybuf, wp[0], wp[1], aa);
+        else if (strchr("diouxX", c)) {
+          long ll;
+
+          if (*aa == '\'' || *aa == '"') ll = aa[1];
+          else ll = strtoll(aa, &end, 0);
+
+          sprintf(to, "*.*ll%c", c);
+          printf(toybuf, wp[0], wp[1], ll);
+        } else if (strchr("feEgG", c)) {
+          long double ld = strtold(aa, &end);
+
+          sprintf(to, "*.*L%c", c);
+          printf(toybuf, wp[0], wp[1], ld);
+        } else error_exit("bad %%%c@%ld", c, (long)(f-*toys.optargs));
+
+        if (end && (errno || *end)) perror_msg("bad %%%c %s", c, aa);
+      }
+    }
+
+    // Posix says to keep looping through format until we consume all args.
+    // This only works if the format actually consumed at least one arg.
+    if (!seen || !*arg) break;
+  }
 }

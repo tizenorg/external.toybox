@@ -1,43 +1,35 @@
-/* reboot.c - Reboot program.
+/* reboot.c - Restart, halt or powerdown the system.
  *
- * Copyright 2012 Ashwini Kumar <ak.ashwini@gmail.com>
- *
- * Not in SUSv4.
+ * Copyright 2013 Elie De Brauwer <eliedebrauwer@gmail.com>
 
-USE_REBOOT(NEWTOY(reboot, "d#<0nf", TOYFLAG_USR|TOYFLAG_BIN))
+USE_REBOOT(NEWTOY(reboot, "fn", TOYFLAG_SBIN|TOYFLAG_NEEDROOT))
+USE_REBOOT(OLDTOY(halt, reboot, TOYFLAG_SBIN|TOYFLAG_NEEDROOT))
+USE_REBOOT(OLDTOY(poweroff, reboot, TOYFLAG_SBIN|TOYFLAG_NEEDROOT))
 
 config REBOOT
   bool "reboot"
   default y
   help
-    usage: reboot [-d delay] [-n] [-f]
+    usage: reboot/halt/poweroff [-fn]
 
-    Reboot utility to reboot the sytem.
-    -d DELAY  waits DELAY seconds before rebooting.
-    -n    overrides sync() call before reboot.
-    -f    Forces system REBOOT and bypasses init process.
+    Restart, halt or powerdown the system.
+
+    -f	Don't signal init
+    -n	Don't sync before stopping the system.
 */
 
 #define FOR_reboot
 #include "toys.h"
-
 #include <sys/reboot.h>
-#include <err.h>
-#include <signal.h>
-#include <syslog.h>
-
-GLOBALS(
-  long delay_number;
-)
 
 void reboot_main(void)
 {
-  if (toys.optflags & FLAG_d) sleep((unsigned int)TT.delay_number);
-  if ((toys.optflags & FLAG_n)?0:1) sync();
-  if (toys.optflags & FLAG_f) reboot(RB_AUTOBOOT); //howto=RB_AUTOBOOT;
-  else {
-    kill(1,SIGTERM);
-    sleep(3);
-    reboot(RB_DISABLE_CAD);
-  }
+  int types[] = {RB_AUTOBOOT, RB_HALT_SYSTEM, RB_POWER_OFF},
+      sigs[] = {SIGINT, SIGUSR1, SIGUSR2}, idx;
+
+  if (!(toys.optflags & FLAG_n)) sync();
+
+  idx = stridx("hp", *toys.which->name)+1;
+  if (toys.optflags & FLAG_f) toys.exitval = reboot(types[idx]);
+  else toys.exitval = kill(1, sigs[idx]);
 }

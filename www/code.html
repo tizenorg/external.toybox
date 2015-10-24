@@ -1,6 +1,7 @@
+<html><head><title>toybox source code walkthrough</title></head>
 <!--#include file="header.html" -->
 
-<p><h1>Code style</h1></p>
+<p><h1><a name="style" /><a href="#style">Code style</a></h1></p>
 
 <p>The primary goal of toybox is _simple_ code. Keeping the code small is
 second, with speed and lots of features coming in somewhere after that.
@@ -13,17 +14,11 @@ This helps code auditing and thus reduces bugs. That said, sometimes being
 more explicit is preferable to being clever enough to outsmart yourself:
 don't be so terse your code is unreadable.</p>
 
-<p>Toybox source uses two spaces per indentation level, and wraps at 80
-columns.</p>
+<p>Toybox has an actual coding style guide over on
+<a href=design.html#codestyle>the design page</a>, but in general we just
+want the code to be consistent.</p>
 
-<p>Gotos are allowed for error handling, and for breaking out of
-nested loops.  In general, a goto should only jump forward (not back), and
-should either jump to the end of an outer loop, or to error handling code
-at the end of the function.  Goto labels are never indented: they override the
-block structure of the file.  Putting them at the left edge makes them easy
-to spot as overrides to the normal flow of control, which they are.</p>
-
-<p><h1>Building Toybox:</h1></p>
+<p><h1><a name="building" /><a href="#building">Building Toybox</a></h1></p>
 
 <p>Toybox is configured using the Kconfig language pioneered by the Linux
 kernel, and adopted by many other projects (uClibc, OpenEmbedded, etc).
@@ -55,7 +50,53 @@ to the environment will take precedence.</p>
 <p>(To clarify: "configure" describes the build and installation environment,
 ".config" lists the features selected by defconfig/menuconfig.)</p>
 
-<p><h1>Infrastructure:</h1></p>
+<p><h1><a name="running"><a href="#running">Running a command</a></h1></p>
+
+<h2>main</h2>
+
+<p>The toybox main() function is at the end of main.c at the top level. It has
+two possible codepaths, only one of which is configured into any given build
+of toybox.</p>
+
+<p>If CONFIG_SINGLE is selected, toybox is configured to contain only a single
+command, so most of the normal setup can be skipped. In this case the
+multiplexer isn't used, instead main() calls toy_singleinit() (also in main.c)
+to set up global state and parse command line arguments, calls the command's
+main function out of toy_list (in the CONFIG_SINGLE case the array has a single entry, no need to search), and if the function returns instead of exiting
+it flushes stdout (detecting error) and returns toys.exitval.</p>
+
+<p>When CONFIG_SINGLE is not selected, main() uses basename() to find the
+name it was run as, shifts its argument list one to the right so it lines up
+with where the multiplexer function expects it, and calls toybox_main(). This
+leverages the multiplexer command's infrastructure to find and run the
+appropriate command. (A command name starting with "toybox" will
+recursively call toybox_main(); you can go "./toybox toybox toybox toybox ls"
+if you want to...)</p>
+
+<h2>toybox_main</h2>
+
+<p>The toybox_main() function is also in main,c. It handles a possible
+--help option ("toybox --help ls"), prints the list of available commands if no
+arguments were provided to the multiplexer (or with full path names if any
+other option is provided before a command name, ala "toybox --list").
+Otherwise it calls toy_exec() on its argument list.</p>
+
+<p>Note that the multiplexer is the first entry in toy_list (the rest of the
+list is sorted alphabetically to allow binary search), so toybox_main can
+cheat and just grab the first entry to quickly set up its context without
+searching. Since all command names go through the multiplexer at least once
+in the non-TOYBOX_SINGLE case, this avoids a redundant search of
+the list.</p>
+
+<p>The toy_exec() function is also in main.c. It performs toy_find() to
+perform a binary search on the toy_list array to look up the command's
+entry by name and saves it in the global variable which, calls toy_init()
+to parse command line arguments and set up global state (using which->options),
+and calls the appropriate command's main() function (which->toy_main). On
+return it flushes all pending ansi FILE * I/O, detects if stdout had an
+error, and then calls xexit() (which uses toys.exitval).</p>
+
+<p><h1><a name="infrastructure" /><a href="#infrastructure">Infrastructure</a></h1></p>
 
 <p>The toybox source code is in following directories:</p>
 <ul>
@@ -66,13 +107,14 @@ other global infrastructure.</li>
 multiple commands:</li>
 <ul>
 <li><a href="#lib_lib">lib/lib.c</a></li>
+<li><a href="#lib_xwrap">lib/xwrap.c</a></li>
 <li><a href="#lib_llist">lib/llist.c</a></li>
 <li><a href="#lib_args">lib/args.c</a></li>
 <li><a href="#lib_dirtree">lib/dirtree.c</a></li>
 </ul>
 <li>The <a href="#toys">toys directory</a> contains the C files implementating
-each command. Currently it contains three subdirectories:
-posix, lsb, and other.</li>
+each command. Currently it contains five subdirectories categorizing the
+commands: posix, lsb, other, example, and pending.</li>
 <li>The <a href="#scripts">scripts directory</a> contains the build and
 test infrastructure.</li>
 <li>The <a href="#kconfig">kconfig directory</a> contains the configuration
@@ -82,34 +124,49 @@ files generated from other parts of the source code.</li>
 </ul>
 
 <a name="adding" />
-<p><h1>Adding a new command</h1></p>
-<p>To add a new command to toybox, add a C file implementing that command under
-the toys directory.  No other files need to be modified; the build extracts
-all the information it needs (such as command line arguments) from specially
-formatted comments and macros in the C file.  (See the description of the
-<a href="#generated">"generated" directory</a> for details.)</p>
+<p><h1><a href="#adding">Adding a new command</a></h1></p>
+<p>To add a new command to toybox, add a C file implementing that command to
+one of the subdirectories under the toys directory.  No other files need to
+be modified; the build extracts all the information it needs (such as command
+line arguments) from specially formatted comments and macros in the C file.
+(See the description of the <a href="#generated">"generated" directory</a>
+for details.)</p>
 
-<p>Currently there are three subdirectories under "toys", one for commands
+<p>Currently there are five subdirectories under "toys", one for commands
 defined by the POSIX standard, one for commands defined by the Linux Standard
-Base, and one for all other commands. (This is just for developer convenience
-sorting them, the directories are otherwise functionally identical.)</p>
+Base, an "other" directory for commands not covered by an obvious standard,
+a directory of example commands (templates to use when starting new commands),
+and a "pending" directory of commands that need further review/cleanup
+before moving to one of the other directories (run these at your own risk,
+cleanup patches welcome).
+These directories are just for developer convenience sorting the commands,
+the directories are otherwise functionally identical. To add a new category,
+create the appropriate directory with a README file in it whose first line
+is the description menuconfig should use for the directory.)</p>
 
-<p>An easy way to start a new command is copy the file "toys/other/hello.c" to
-the name of the new command, and modify this copy to implement the new command.
-This file is an example command meant to be used as a "skeleton" for
-new commands (more or less by turning every instance of "hello" into the
+<p>An easy way to start a new command is copy the file "toys/example/hello.c"
+to the name of the new command, and modify this copy to implement the new
+command (more or less by turning every instance of "hello" into the
 name of your command, updating the command line arguments, globals, and
-help data,  and then filling out its "main" function with code that does
-something interesting).  It provides examples of all the build infrastructure
-(including optional elements like command line argument parsing and global
-variables that a "hello world" program doesn't strictly need).</p>
+help data, and then filling out its "main" function with code that does
+something interesting).</p> 
+
+<p>You could also start with "toys/example/skeleton.c", which provides a lot
+more example code (showing several variants of command line option
+parsing, how to implement multiple commands in the same file, and so on).
+But usually it's just more stuff to delete.</p>
 
 <p>Here's a checklist of steps to turn hello.c into another command:</p>
 
 <ul>
-<li><p>First "cd toys/other" and "cp hello.c yourcommand.c".  Note that the name
-of this file is significant, it's the name of the new command you're adding
-to toybox.  Open your new file in your favorite editor.</p></li>
+<li><p>First "cp toys/example/hello.c toys/other/yourcommand.c" and open
+the new file in your preferred text editor.</p>
+<ul><li><p>Note that the
+name of the new file is significant: it's the name of the new command you're
+adding to toybox. The build includes all *.c files under toys/*/ whose
+names are a case insensitive match for an enabled config symbol. So
+toys/posix/cat.c only gets included if you have "CAT=y" in ".config".</p></li>
+</ul></p></li>
 
 <li><p>Change the one line comment at the top of the file (currently
 "hello.c - A hello world program") to describe your new file.</p></li>
@@ -127,7 +184,7 @@ structure.  The arguments to the NEWTOY macro are:</p>
 
 <ol>
 <li><p>the name used to run your command</p></li>
-<li><p>the command line argument <a href="#lib_args">option parsing string</a> (NULL if none)</p></li>
+<li><p>the command line argument <a href="#lib_args">option parsing string</a> (0 if none)</p></li>
 <li><p>a bitfield of TOYFLAG values
 (defined in toys.h) providing additional information such as where your
 command should be installed on a running system, whether to blank umask
@@ -175,10 +232,49 @@ correspond to the arguments specified in NEWTOY().
 where execution of your command starts. Your command line options are
 already sorted into this.optflags, this.optargs, this.optc, and the GLOBALS()
 as appropriate by the time this function is called. (See
-<a href="#lib_args">get_optflags()</a> for details.</p></li>
+<a href="#lib_args">get_optflags()</a> for details.)</p></li>
+
+<li><p>Switch on TOYBOX_DEBUG in menuconfig (toybox global settings menu)
+the first time you build and run your new command. If anything is wrong
+with your option string, that will give you error messages.</p>
+
+<p>Otherwise it'll just segfault without
+explanation when it falls off the end because it didn't find a matching
+end parantheses for a longopt, or you put a nonexistent option in a square
+bracket grouping... Since these kind of errors can only be caused by a
+developer, not by end users, we don't normally want runtime checks for
+them. Once you're happy with your option string, you can switch TOYBOX_DEBUG
+back off.</p></li>
 </ul>
 
-<p><a name="top" /><h2>Top level directory.</h2></p>
+<a name="headers" /><h2><a href="#headers">Headers.</a></h2>
+
+<p>Commands generally don't have their own headers. If it's common code
+it can live in lib/, if it isn't put it in the command's .c file. (The line
+between implementing multiple commands in a C file via OLDTOY() to share
+infrastructure and moving that shared infrastructure to lib/ is a judgement
+call. Try to figure out which is simplest.)</p>
+
+<p>The top level toys.h should #include all the standard (posix) headers
+that any command uses. (Partly this is friendly to ccache and partly this
+makes the command implementations shorter.) Individual commands should only
+need to include nonstandard headers that might prevent that command from
+building in some context we'd care about (and thus requiring that command to
+be disabled to avoid a build break).</p>
+
+<p>Target-specific stuff (differences between compiler versions, libc versions,
+or operating systems) should be confined to lib/portability.h and
+lib/portability.c. (There's even some minimal compile-time environment probing
+that writes data to generated/portability.h, see scripts/genconfig.sh.)</p>
+
+<p>Only include linux/*.h headers from individual commands (not from other
+headers), and only if you really need to. Data that varies per architecture
+is a good reason to include a header. If you just need a couple constants
+that haven't changed since the 1990's, it's ok to #define them yourself or
+just use the constant inline with a comment explaining what it is. (A
+#define that's only used once isn't really helping.)</p>
+
+<p><a name="top" /><h1><a href="#top">Top level directory.</a></h1></p>
 
 <p>This directory contains global infrastructure.</p>
 
@@ -386,13 +482,14 @@ install path prepended.</p></li>
 to build into toybox (thus generating a .config file), and by
 scripts/config2help.py to create generated/help.h.</p>
 
-<h3>Temporary files:</h3>
+<a name="generated" />
+<h1><a href="#generated">Temporary files:</a></h1>
 
 <p>There is one temporary file in the top level source directory:</p>
 <ul>
 <li><p><b>.config</b> - Configuration file generated by kconfig, indicating
 which commands (and options to commands) are currently enabled.  Used
-to make generated/config.h and determine which toys/*.c files to build.</p>
+to make generated/config.h and determine which toys/*/*.c files to build.</p>
 
 <p>You can create a human readable "miniconfig" version of this file using
 <a href=http://landley.net/aboriginal/new_platform.html#miniconfig>these
@@ -400,93 +497,121 @@ instructions</a>.</p>
 </li>
 </ul>
 
-<a name="generated" />
-<p>The "generated/" directory contains files generated from other source code
-in toybox.  All of these files can be recreated by the build system, although
-some (such as generated/help.h) are shipped in release versions to reduce
-environmental dependencies (I.E. so you don't need python on your build
-system).</p>
+<p><h2>Directory generated/</h2></p>
+
+<p>The remaining temporary files live in the "generated/" directory,
+which is for files generated at build time from other source files.</p>
 
 <ul>
+<li><p><b>generated/Config.in</b> - Kconfig entries for each command, included
+from the top level Config.in. The help text here is used to generate
+help.h.</p>
+
+<p>Each command has a configuration entry with an upper case version of
+the command name. Options to commands start with the command
+name followed by an underscore and the option name. Global options are attached
+to the "toybox" command, and thus use the prefix "TOYBOX_".  This organization
+is used by scripts/cfg2files to select which toys/*/*.c files to compile for a
+given .config.</p>
+</li>
+
 <li><p><b>generated/config.h</b> - list of CFG_SYMBOL and USE_SYMBOL() macros,
-generated from .config by a sed invocation in the top level Makefile.</p>
+generated from .config by a sed invocation in scripts/make.sh.</p>
 
 <p>CFG_SYMBOL is a comple time constant set to 1 for enabled symbols and 0 for
-disabled symbols.  This allows the use of normal if() statements to remove
+disabled symbols. This allows the use of normal if() statements to remove
 code at compile time via the optimizer's dead code elimination (which removes
-from the binary any code that cannot be reached).  This saves space without
+from the binary any code that cannot be reached). This saves space without
 cluttering the code with #ifdefs or leading to configuration dependent build
-breaks.  (See the 1992 Usenix paper
+breaks. (See the 1992 Usenix paper
 <a href=http://doc.cat-v.org/henry_spencer/ifdef_considered_harmful.pdf>#ifdef
 Considered Harmful</a> for more information.)</p>
 
-<p>USE_SYMBOL(code) evaluates to the code in parentheses when the symbol
-is enabled, and nothing when the symbol is disabled.  This can be used
-for things like varargs or variable declarations which can't always be
-eliminated by a simple test on CFG_SYMBOL.  Note that
-(unlike CFG_SYMBOL) this is really just a variant of #ifdef, and can
-still result in configuration dependent build breaks.  Use with caution.</p>
+<p>When you can't entirely avoid an #ifdef, the USE_SYMBOL(code) macro
+provides a less intrusive alternative, evaluating to the code in parentheses
+when the symbol is enabled, and nothing when the symbol is disabled. This
+is most commonly used around NEWTOY() declarations (so only the enabled
+commands show up in toy_list), and in option strings. This can also be used
+for things like varargs or structure members which can't always be
+eliminated by a simple test on CFG_SYMBOL. Remember, unlike CFG_SYMBOL
+this is really just a variant of #ifdef, and can still result in configuration
+dependent build breaks. Use with caution.</p>
+</li>
+
+<li><p><b>generated/flags.h</b> - FLAG_? macros indicating which command
+line options were seen. The option parsing in lib/args.c sets bits in
+toys.optflags, which can be tested by anding with the appropriate FLAG_
+macro. (Bare longopts, which have no corresponding short option, will
+have the longopt name after FLAG_. All others use the single letter short
+option.)</p>
+
+<p>To get the appropriate macros for your command, #define FOR_commandname
+before #including toys.h. To switch macro sets (because you have an OLDTOY()
+with different options in the same .c file), #define CLEANUP_oldcommand
+and also #define FOR_newcommand, then #include "generated/flags.h" to switch.
+</p>
+</li>
+
+<li><p><b>generated/globals.h</b> -
+Declares structures to hold the contents of each command's GLOBALS(),
+and combines them into "global_union this". (Yes, the name was
+chosen to piss off C++ developers who think that C
+is merely a subset of C++, not a language in its own right.)</p>
+
+<p>The union reuses the same memory for each command's global struct:
+since only one command's globals are in use at any given time, collapsing
+them together saves space. The headers #define TT to the appropriate
+"this.commandname", so you can refer to the current command's global
+variables out of "this" as TT.variablename.</p>
+
+<p>The globals start zeroed, and the first few are filled out by the 
+lib/args.c argument parsing code called from main.c.</p>
+</li>
+
+<li><p><b>toys/help.h</b> - Help strings for use by the "help" command and
+--help options. This file #defines a help_symbolname string for each
+symbolname, but only the symbolnames matching command names get used
+by show_help() in lib/help.c to display help for commands.</p>
+
+<p>This file is created by scripts/make.sh, which compiles scripts/config2help.c
+into the binary generated/config2help, and then runs it against the top
+level .config and Config.in files to extract the help text from each config
+entry and collate together dependent options.</p>
+
+<p>This file contains help text for all commands, regardless of current
+configuration, but only the ones currently enabled in the .config file
+wind up in the help_data[] array, and only the enabled dependent options
+have their help text added to the command they depend on.</p>
+</li>
+
+<li><p><b>generated/newtoys.h</b> - 
+All the NEWTOY() and OLDTOY() macros from toys/*/*.c. The "toybox" multiplexer
+is the first entry, the rest are in alphabetical order. Each line should be
+inside an appropriate USE_ macro, so code that #includes this file only sees
+the currently enabled commands.</p>
+
+<p>By #definining NEWTOY() to various things before #including this file,
+it may be used to create function prototypes (in toys.h), initialize the
+help_data array (in lib/help.c),  initialize the toy_list array (in main.c,
+the alphabetical order lets toy_find() do a binary search, the exception to
+the alphabetical order lets it use the multiplexer without searching), and so
+on.  (It's even used to initialize the NEED_OPTIONS macro, which produces a 1
+or 0 for each command using command line option parsing, which is ORed together
+to allow compile-time dead code elimination to remove the whole of
+lib/args.c if nothing currently enabled is using it.)<p>
+
+<p>Each NEWTOY and OLDTOY macro contains the command name, command line
+option string (telling lib/args.c how to parse command line options for
+this command), recommended install location, and miscelaneous data such
+as whether this command should retain root permissions if installed suid.</p>
+</li>
+
+<li><p><b>toys/oldtoys.h</b> - Macros with the command line option parsing
+string for each NEWTOY. This allows an OLDTOY that's just an alias for an
+existing command to refer to the existing option string instead of
+having to repeat it.</p>
 </li>
 </ul>
-
-<p><h2>Directory toys/</h2></p>
-
-<h3>toys/Config.in</h3>
-
-<p>Included from the top level Config.in, contains one or more
-configuration entries for each command.</p>
-
-<p>Each command has a configuration entry matching the command name (although
-configuration symbols are uppercase and command names are lower case).
-Options to commands start with the command name followed by an underscore and
-the option name.  Global options are attached to the "toybox" command,
-and thus use the prefix "TOYBOX_".  This organization is used by
-scripts/cfg2files to select which toys/*.c files to compile for a given
-.config.</p>
-
-<p>A command with multiple names (or multiple similar commands implemented in
-the same .c file) should have config symbols prefixed with the name of their
-C file.  I.E. config symbol prefixes are NEWTOY() names.  If OLDTOY() names
-have config symbols they're options (symbols with an underscore and suffix)
-to the NEWTOY() name.  (See toys/toylist.h)</p>
-
-<h3>toys/toylist.h</h3>
-<p>The first half of this file prototypes all the structures to hold
-global variables for each command, and puts them in toy_union.  These
-prototypes are only included if the macro NEWTOY isn't defined (in which
-case NEWTOY is defined to a default value that produces function
-prototypes).</p>
-
-<p>The second half of this file lists all the commands in alphabetical
-order, along with their command line arguments and install location.
-Each command has an appropriate configuration guard so only the commands that
-are enabled wind up in the list.</p>
-
-<p>The first time this header is #included, it defines structures and
-produces function prototypes for the commands in the toys directory.</p>
-
-
-<p>The first time it's included, it defines structures and produces function
-prototypes.
-  This
-is used to initialize toy_list in main.c, and later in that file to initialize
-NEED_OPTIONS (to figure out whether the command like parsing logic is needed),
-and to put the help entries in the right order in toys/help.c.</p>
-
-<h3>toys/help.h</h3>
-
-<p>#defines two help text strings for each command: a single line
-command_help and an additinal command_help_long.  This is used by help_main()
-in toys/help.c to display help for commands.</p>
-
-<p>Although this file is generated from Config.in help entries by
-scripts/config2help.py, it's shipped in release tarballs so you don't need
-python on the build system.  (If you check code out of source control, or
-modify Config.in, then you'll need python installed to rebuild it.)</p>
-
-<p>This file contains help for all commands, regardless of current
-configuration, but only the currently enabled ones are entered into help_data[]
-in toys/help.c.</p>
 
 <a name="lib">
 <h2>Directory lib/</h2>
@@ -496,6 +621,163 @@ in toys/help.c.</p>
 <p>lib: getmountlist(), error_msg/error_exit, xmalloc(),
 strlcpy(), xexec(), xopen()/xread(), xgetcwd(), xabspath(), find_in_path(),
 itoa().</p>
+
+
+
+<a name="lib_xwrap"><h3>lib/xwrap.c</h3>
+
+<p>Functions prefixed with the letter x call perror_exit() when they hit
+errors, to eliminate common error checking. This prints an error message
+and the strerror() string for the errno encountered.</p>
+
+<p>You can intercept this exit by assigning a setjmp/longjmp buffer to
+toys.rebound (set it back to zero to restore the default behavior).
+If you do this, cleaning up resource leaks is your problem.</p>
+
+<ul>
+<li><b>void xstrncpy(char *dest, char *src, size_t size)</b></li>
+<li><b>void xexit(void)</b></li>
+<li><b>void *xmalloc(size_t size)</b></li>
+<li><b>void *xzalloc(size_t size)</b></li>
+<li><b>void *xrealloc(void *ptr, size_t size)</b></li>
+<li><b>char *xstrndup(char *s, size_t n)</b></li>
+<li><b>char *xstrdup(char *s)</b></li>
+<li><b>char *xmprintf(char *format, ...)</b></li>
+<li><b>void xprintf(char *format, ...)</b></li>
+<li><b>void xputs(char *s)</b></li>
+<li><b>void xputc(char c)</b></li>
+<li><b>void xflush(void)</b></li>
+<li><b>pid_t xfork(void)</b></li>
+<li><b>void xexec_optargs(int skip)</b></li>
+<li><b>void xexec(char **argv)</b></li>
+<li><b>pid_t xpopen(char **argv, int *pipes)</b></li>
+<li><b>int xpclose(pid_t pid, int *pipes)</b></li>
+<li><b>void xaccess(char *path, int flags)</b></li>
+<li><b>void xunlink(char *path)</b></li>
+<li><p><b>int xcreate(char *path, int flags, int mode)<br />
+int xopen(char *path, int flags)</b></p>
+
+<p>The xopen() and xcreate() functions open an existing file (exiting if
+it's not there) and create a new file (exiting if it can't).</p>
+
+<p>They default to O_CLOEXEC so the filehandles aren't passed on to child
+processes. Feed in O_CLOEXEC to disable this.</p>
+</li>
+<li><p><b>void xclose(int fd)</b></p>
+
+<p>Because NFS is broken, and won't necessarily perform the requested
+operation (and report the error) until you close the file. Of course, this
+being NFS, it's not guaranteed to report the error there either, but it
+_can_.</p>
+
+<p>Nothing else ever reports an error on close, everywhere else it's just a
+VFS operation freeing some resources. NFS is _special_, in a way that
+other network filesystems like smbfs and v9fs aren't..</p>
+</li>
+<li><b>int xdup(int fd)</b></li>
+<li><p><b>size_t xread(int fd, void *buf, size_t len)</b></p>
+
+<p>Can return 0, but not -1.</p>
+</li>
+<li><p><b>void xreadall(int fd, void *buf, size_t len)</b></p>
+
+<p>Reads the entire len-sized buffer, retrying to complete short
+reads. Exits if it can't get enough data.</p></li>
+
+<li><p><b>void xwrite(int fd, void *buf, size_t len)</b></p>
+
+<p>Retries short writes, exits if can't write the entire buffer.</p></li>
+
+<li><b>off_t xlseek(int fd, off_t offset, int whence)</b></li>
+<li><b>char *xgetcwd(void)</b></li>
+<li><b>void xstat(char *path, struct stat *st)</b></li>
+<li><p><b>char *xabspath(char *path, int exact) </b></p>
+
+<p>After several years of
+<a href=http://landley.net/notes-2007.html#18-06-2007>wrestling</a>
+<a href=http://landley.net/notes-2008.html#19-01-2008>with</a> realpath(), 
+I broke down and <a href=http://landley.net/notes-2012.html#20-11-2012>wrote
+my own</a> implementation that doesn't use the one in libc. As I explained:
+
+<blockquote><p>If the path ends with a broken link,
+readlink -f should show where the link points to, not where the broken link
+lives. (The point of readlink -f is "if I write here, where would it attempt
+to create a file".) The problem is, realpath() returns NULL for a path ending
+with a broken link, and I can't beat different behavior out of code locked
+away in libc.</p></blockquote>
+
+<p>
+</li>
+<li><b>void xchdir(char *path)</b></li>
+<li><b>void xchroot(char *path)</b></li>
+
+<li><p><b>struct passwd *xgetpwuid(uid_t uid)<br />
+struct group *xgetgrgid(gid_t gid)<br />
+struct passwd *xgetpwnam(char *name)</b></p>
+
+<p></p>
+</li>
+
+
+
+<li><b>void xsetuser(struct passwd *pwd)</b></li>
+<li><b>char *xreadlink(char *name)</b></li>
+<li><b>char *xreadfile(char *name, char *buf, off_t len)</b></li>
+<li><b>int xioctl(int fd, int request, void *data)</b></li>
+<li><b>void xpidfile(char *name)</b></li>
+<li><b>void xsendfile(int in, int out)</b></li>
+<li><b>long xparsetime(char *arg, long units, long *fraction)</b></li>
+<li><b>void xregcomp(regex_t *preg, char *regex, int cflags)</b></li>
+</ul>
+
+<a name="lib_lib"><h3>lib/lib.c</h3>
+<p>Eight gazillion common functions:</p>
+
+<ul>
+<li><b>void verror_msg(char *msg, int err, va_list va)</b></li>
+<li><b>void error_msg(char *msg, ...)</b></li>
+<li><b>void perror_msg(char *msg, ...)</b></li>
+<li><b>void error_exit(char *msg, ...)</b></li>
+<li><b>void perror_exit(char *msg, ...)</b></li>
+<li><b>ssize_t readall(int fd, void *buf, size_t len)</b></li>
+<li><b>ssize_t writeall(int fd, void *buf, size_t len)</b></li>
+<li><b>off_t lskip(int fd, off_t offset)</b></li>
+<li><b>int mkpathat(int atfd, char *dir, mode_t lastmode, int flags)</b></li>
+<li><b>struct string_list **splitpath(char *path, struct string_list **list)</b></li>
+<li><b>struct string_list *find_in_path(char *path, char *filename)</b></li>
+<li><b>long atolx(char *numstr)</b></li>
+<li><b>long atolx_range(char *numstr, long low, long high)</b></li>
+<li><b>int numlen(long l)</b></li>
+<li><b>int stridx(char *haystack, char needle)</b></li>
+<li><b>int strstart(char **a, char *b)</b></li>
+<li><b>off_t fdlength(int fd)</b></li>
+<li><b>char *readfile(char *name, char *ibuf, off_t len)</b></li>
+<li><b>void msleep(long miliseconds)</b></li>
+<li><b>int64_t peek_le(void *ptr, unsigned size)</b></li>
+<li><b>int64_t peek_be(void *ptr, unsigned size)</b></li>
+<li><b>int64_t peek(void *ptr, unsigned size)</b></li>
+<li><b>void poke(void *ptr, uint64_t val, int size)</b></li>
+<li><b>void loopfiles_rw(char **argv, int flags, int permissions, int failok,</b></li>
+<li><b>void loopfiles(char **argv, void (*function)(int fd, char *name))</b></li>
+<li><b>char *get_rawline(int fd, long *plen, char end)</b></li>
+<li><b>char *get_line(int fd)</b></li>
+<li><b>int wfchmodat(int fd, char *name, mode_t mode)</b></li>
+<li><b>static void tempfile_handler(int i)</b></li>
+<li><b>int copy_tempfile(int fdin, char *name, char **tempname)</b></li>
+<li><b>void delete_tempfile(int fdin, int fdout, char **tempname)</b></li>
+<li><b>void replace_tempfile(int fdin, int fdout, char **tempname)</b></li>
+<li><b>void crc_init(unsigned int *crc_table, int little_endian)</b></li>
+<li><b>int terminal_size(unsigned *xx, unsigned *yy)</b></li>
+<li><b>int yesno(char *prompt, int def)</b></li>
+<li><b>void generic_signal(int sig)</b></li>
+<li><b>void sigatexit(void *handler)</b></li>
+<li><b>int sig_to_num(char *pidstr)</b></li>
+<li><b>char *num_to_sig(int sig)</b></li>
+<li><b>mode_t string_to_mode(char *modestr, mode_t mode)</b></li>
+<li><b>void mode_to_string(mode_t mode, char *buf)</b></li>
+<li><b>void names_to_pid(char **names, int (*callback)(pid_t pid, char *name))</b></li>
+<li><b>int human_readable(char *buf, unsigned long long num)</b></li>
+</ul>
 
 <h3>lib/portability.h</h3>
 
@@ -574,14 +856,16 @@ struct double_list *new) - append existing struct double_list to
 list, does not allocate anything.</p></li></ul>
 </ul>
 
-<b>Trivia questions:</b>
+<b>List code trivia questions:</b>
 
 <ul>
 <li><p><b>Why do arg_list and double_list contain a char * payload instead of
 a void *?</b> - Because you always have to typecast a void * to use it, and
-typecasting a char * does no harm. Thus having it default to the most common
-pointer type saves a few typecasts (strings are the most common payload),
-and doesn't hurt anything otherwise.</p>
+typecasting a char * does no harm. Since strings are the most common
+payload, and doing math on the pointer ala
+"(type *)(ptr+sizeof(thing)+sizeof(otherthing))" requires ptr to be char *
+anyway (at least according to the C standard), defaulting to char * saves
+a typecast.</p>
 </li>
 
 <li><p><b>Why do the names ->str, ->arg, and ->data differ?</b> - To force
@@ -590,10 +874,10 @@ be bad, and _failing_ to free(node->arg) leaks memory.</p></li>
 
 <li><p><b>Why does llist_pop() take a void * instead of void **?</b> -
 because the stupid compiler complains about "type punned pointers" when
-you typecast and dereference ont he same line,
+you typecast and dereference on the same line,
 due to insane FSF developers hardwiring limitations of their optimizer
 into gcc's warning system. Since C automatically typecasts any other
-pointer _down_ to a void *, the current code works fine. It's sad that it
+pointer type to and from void *, the current code works fine. It's sad that it
 won't warn you if you forget the &, but the code crashes pretty quickly in
 that case.</p></li>
 
@@ -605,20 +889,21 @@ a double_list, dlist_add() your entries, and then break the circle with
 <a name="lib_args"><h3>lib/args.c</h3>
 
 <p>Toybox's main.c automatically parses command line options before calling the
-command's main function.  Option parsing starts in get_optflags(), which stores
+command's main function. Option parsing starts in get_optflags(), which stores
 results in the global structures "toys" (optflags and optargs) and "this".</p>
 
 <p>The option parsing infrastructure stores a bitfield in toys.optflags to
-indicate which options the current command line contained.  Arguments
+indicate which options the current command line contained, and defines FLAG
+macros code can use to check whether each argument's bit is set. Arguments
 attached to those options are saved into the command's global structure
-("this").  Any remaining command line arguments are collected together into
-the null-terminated array toys.optargs, with the length in toys.optc.  (Note
+("this"). Any remaining command line arguments are collected together into
+the null-terminated array toys.optargs, with the length in toys.optc. (Note
 that toys.optargs does not contain the current command name at position zero,
-use "toys.which->name" for that.)  The raw command line arguments get_optflags()
+use "toys.which->name" for that.) The raw command line arguments get_optflags()
 parsed are retained unmodified in toys.argv[].</p>
 
 <p>Toybox's option parsing logic is controlled by an "optflags" string, using
-a format reminiscent of getopt's optargs but has several important differences.
+a format reminiscent of getopt's optargs but with several important differences.
 Toybox does not use the getopt()
 function out of the C library, get_optflags() is an independent implementation
 which doesn't permute the original arguments (and thus doesn't change how the
@@ -632,14 +917,14 @@ command line arguments to look for, and what to do with them.
 If a command has no option
 definition string (I.E. the argument is NULL), option parsing is skipped
 for that command, which must look at the raw data in toys.argv to parse its
-own arguments.  (If no currently enabled command uses option parsing,
+own arguments. (If no currently enabled command uses option parsing,
 get_optflags() is optimized out of the resulting binary by the compiler's
 --gc-sections option.)</p>
 
 <p>You don't have to free the option strings, which point into the environment
-space (I.E. the string data is not copied).  A TOYFLAG_NOFORK command
+space (I.E. the string data is not copied). A TOYFLAG_NOFORK command
 that uses the linked list type "*" should free the list objects but not
-the data they point to, via "llist_free(TT.mylist, NULL);".  (If it's not
+the data they point to, via "llist_free(TT.mylist, NULL);". (If it's not
 NOFORK, exit() will free all the malloced data anyway unless you want
 to implement a CONFIG_TOYBOX_FREE cleanup for it.)</p>
 
@@ -660,10 +945,10 @@ available to command_main():
 <ul>
 <li><p>In <b>struct toys</b>:
 <ul>
-<li>toys.optflags = 13; // -a = 8 | -b = 4 | -d = 1</li>
+<li>toys.optflags = 13; // FLAG_a = 8 | FLAG_b = 4 | FLAG_d = 1</li>
 <li>toys.optargs[0] = "walrus"; // leftover argument</li>
 <li>toys.optargs[1] = NULL; // end of list</li>
-<li>toys.optc=1; // there was 1 leftover argument</li>
+<li>toys.optc = 1; // there was 1 leftover argument</li>
 <li>toys.argv[] = {"-b", "fruit", "-d", "walrus", "-a", "42"}; // The original command line arguments
 </ul>
 <p></li>
@@ -686,10 +971,17 @@ GLOBALS(
 	long a;
 )
 </pre></blockquote>
+
 <p>That would mean TT.c == NULL, TT.b == "fruit", and TT.a == 42.  (Remember,
 each entry that receives an argument must be a long or pointer, to line up
 with the array position.  Right to left in the optflags string corresponds to
 top to bottom in GLOBALS().</p>
+
+<p>Put globals not filled out by the option parsing logic at the end of the
+GLOBALS block. Common practice is to list the options one per line (to
+make the ordering explicit, first to last in globals corresponds to right
+to left in the option string), then leave a blank line before any non-option
+globals.</p>
 
 <p><b>long toys.optflags</b></p>
 
@@ -698,19 +990,39 @@ toys.optflags, with the same value as a corresponding binary digit.  The
 rightmost argument is (1<<0), the next to last is (1<<1) and so on.  If
 the option isn't encountered while parsing argv[], its bit remains 0.</p>
 
+<p>Each option -x has a FLAG_x macro for the command letter. Bare --longopts
+with no corresponding short option have a FLAG_longopt macro for the long
+optionname. Commands enable these macros by #defining FOR_commandname before
+#including <toys.h>. When multiple commands are implemented in the same
+source file, you can switch flag contexts later in the file by
+#defining CLEANUP_oldcommand and #defining FOR_newcommand, then
+#including <generated/flags.h>.</p>
+
+<p>Options disabled in the current configuration (wrapped in
+a USE_BLAH() macro for a CONFIG_BLAH that's switched off) have their
+corresponding FLAG macro set to zero, so code checking them ala
+if (toys.optargs & FLAG_x) gets optimized out via dead code elimination.
+#defining FORCE_FLAGS when switching flag context disables this
+behavior: the flag is never zero even if the config is disabled. This
+allows code shared between multiple commands to use the same flag
+values, as long as the common flags match up right to left in both option
+strings.</p>
+
 <p>For example,
 the optflags string "abcd" would parse the command line argument "-c" to set
 optflags to 2, "-a" would set optflags to 8, "-bd" would set optflags to
-6 (I.E. 4|2), and "-a -c" would set optflags to 10 (2|8).</p>
+6 (I.E. 4|2), and "-a -c" would set optflags to 10 (2|8). To check if -c
+was encountered, code could test: if (toys.optflags & FLAG_c) printf("yup");
+(See the toys/examples directory for more.)</p>
 
 <p>Only letters are relevant to optflags, punctuation is skipped: in the
-string "a*b:c#d", d=1, c=2, b=4, a=8.  The punctuation after a letter
+string "a*b:c#d", d=1, c=2, b=4, a=8. The punctuation after a letter
 usually indicate that the option takes an argument.</p>
 
-<p>Since toys.optflags is an unsigned int, it only stores 32 bits.  (Which is
+<p>Since toys.optflags is an unsigned int, it only stores 32 bits. (Which is
 the amount a long would have on 32-bit platforms anyway; 64 bit code on
 32 bit platforms is too expensive to require in common code used by almost
-all commands.)  Bit positions beyond the 1<<31 aren't recorded, but
+all commands.) Bit positions beyond the 1<<31 aren't recorded, but
 parsing higher options can still set global variables.</p>
 
 <p><b>Automatically setting global variables from arguments (union this)</b></p>
@@ -723,37 +1035,31 @@ argument letter, indicating the option takes an additional argument:</p>
 <li><b>*</b> - plus a string argument, appended to a linked list.</li>
 <li><b>@</b> - plus an occurrence counter (stored in a long)</li>
 <li><b>#</b> - plus a signed long argument.
+<li><b>-</b> - plus a signed long argument defaulting to negative (start argument with + to force a positive value).</li>
 <li><b>.</b> - plus a floating point argument (if CFG_TOYBOX_FLOAT).</li>
 <ul>The following can be appended to a float or double:
 <li><b>&lt;123</b> - error if argument is less than this</li>
 <li><b>&gt;123</b> - error if argument is greater than this</li>
 <li><b>=123</b> - default value if argument not supplied</li>
 </ul>
-<ul><li>Option parsing only understands <>= after . when CFG_TOYBOX_FLOAT
-is enabled. (Otherwise the code to determine where floating point constants
-end drops out.  When disabled, it can reserve a global data slot for the
-argument so offsets won't change, but will never fill it out.). You can handle
-this by using the USE_BLAH() macros with C string concatenation, ala:
-"abc." USE_TOYBOX_FLOAT("<1.23>4.56=7.89") "def"</li></ul>
 </ul>
 
-<p>Arguments may occur with or without a space (I.E. "-a 42" or "-a42").
-The command line argument "-abc" may be interepreted many different ways:
-the optflags string "cba" sets toys.optflags = 7, "c:ba" sets toys.optflags=4
-and saves "ba" as the argument to -c, and "cb:a" sets optflags to 6 and saves
-"c" as the argument to -b.</p>
+<p><b>GLOBALS</b></p>
 
 <p>Options which have an argument fill in the corresponding slot in the global
 union "this" (see generated/globals.h), treating it as an array of longs
-with the rightmost saved in this[0].  Again using "a*b:c#d", "-c 42" would set
-this[0]=42; and "-b 42" would set this[1]="42"; each slot is left NULL if
-the corresponding argument is not encountered.</p>
+with the rightmost saved in this[0].  As described above, using "a*b:c#d",
+"-c 42" would set this[0] = 42; and "-b 42" would set this[1] = "42"; each
+slot is left NULL if the corresponding argument is not encountered.</p>
 
 <p>This behavior is useful because the LP64 standard ensures long and pointer
 are the same size. C99 guarantees structure members will occur in memory
 in the same order they're declared, and that padding won't be inserted between
 consecutive variables of register size.  Thus the first few entries can
 be longs or pointers corresponding to the saved arguments.</p>
+
+<p>See toys/example/*.c for longer examples of parsing options into the
+GLOBALS block.</p>
 
 <p><b>char *toys.optargs[]</b></p>
 
@@ -793,10 +1099,6 @@ optflag, but letters are never control characters.)</p>
 <ul>
 <li><b>^</b> - stop parsing options after encountering this option, everything else goes into optargs.</li>
 <li><b>|</b> - this option is required.  If more than one marked, only one is required.</li>
-<li><b>+X</b> enabling this option also enables option X (switch bit on).</li>
-<li><b>~X</b> enabling this option disables option X (switch bit off).</li>
-<li><b>!X</b> this option cannot be used in combination with X (die with error).</li>
-<li><b>[yz]</b> this option requires at least one of y or z to also be enabled.</li>
 </ul>
 
 <p>The following may be appended to a float or double:</p>
@@ -810,7 +1112,7 @@ optflag, but letters are never control characters.)</p>
 <p>Option parsing only understands <>= after . when CFG_TOYBOX_FLOAT
 is enabled. (Otherwise the code to determine where floating point constants
 end drops out.  When disabled, it can reserve a global data slot for the
-argument so offsets won't change, but will never fill it out.). You can handle
+argument so offsets won't change, but will never fill it out.) You can handle
 this by using the USE_BLAH() macros with C string concatenation, ala:</p>
 
 <blockquote>"abc." USE_TOYBOX_FLOAT("<1.23>4.56=7.89") "def"</blockquote>
@@ -818,19 +1120,73 @@ this by using the USE_BLAH() macros with C string concatenation, ala:</p>
 <p><b>--longopts</b></p>
 
 <p>The optflags string can contain long options, which are enclosed in
-parentheses.  They may be appended to an existing option character, in
+parentheses. They may be appended to an existing option character, in
 which case the --longopt is a synonym for that option, ala "a:(--fred)"
 which understands "-a blah" or "--fred blah" as synonyms.</p>
 
 <p>Longopts may also appear before any other options in the optflags string,
 in which case they have no corresponding short argument, but instead set
-their own bit based on position.  So for "(walrus)#(blah)xy:z" "command
+their own bit based on position. So for "(walrus)#(blah)xy:z", "command
 --walrus 42" would set toys.optflags = 16 (-z = 1, -y = 2, -x = 4, --blah = 8)
 and would assign this[1] = 42;</p>
 
 <p>A short option may have multiple longopt synonyms, "a(one)(two)", but
 each "bare longopt" (ala "(one)(two)abc" before any option characters)
 always sets its own bit (although you can group them with +X).</p>
+
+<p>Only bare longopts have a FLAG_ macro with the longopt name
+(ala --fred would #define FLAG_fred). Other longopts use the short
+option's FLAG macro to test the toys.optflags bit.</p>
+
+<p>Options with a semicolon ";" after their data type can only set their
+corresponding GLOBALS() entry via "--longopt=value". For example, option
+string "x(boing): y" would set TT.x if it saw "--boing=value", but would
+treat "--boing value" as setting FLAG_x in toys.optargs, leaving TT.x NULL,
+and keeping "value" in toys.optargs[]. (This lets "ls --color" and
+"ls --color=auto" both work.)</p>
+
+<p><b>[groups]</b></p>
+
+<p>At the end of the option string, square bracket groups can define
+relationships between existing options. (This only applies to short
+options, bare --longopts can't participate.)</p>
+
+<p>The first character of the group defines the type, the remaining
+characters are options it applies to:</p>
+
+<ul>
+<li><b>-</b> - Exclusive, switch off all others in this group.</li>
+<li><b>+</b> - Inclusive, switch on all others in this group.</li>
+<li><b>!</b> - Error, fail if more than one defined.</li>
+</ul>
+
+<p>So "abc[-abc]" means -ab = -b, -ba = -a, -abc = -c. "abc[+abc]"
+means -ab=-abc, -c=-abc, and "abc[!abc] means -ab calls error_exit("no -b
+with -a"). Note that [-] groups clear the GLOBALS option slot of
+options they're switching back off, but [+] won't set options it didn't see
+(just the optflags).</p>
+
+<p><b>whitespace</b></p>
+
+<p>Arguments may occur with or without a space (I.E. "-a 42" or "-a42").
+The command line argument "-abc" may be interepreted many different ways:
+the optflags string "cba" sets toys.optflags = 7, "c:ba" sets toys.optflags=4
+and saves "ba" as the argument to -c, and "cb:a" sets optflags to 6 and saves
+"c" as the argument to -b.</p>
+
+<p>Note that &amp; changes whitespace handling, so that the command line
+"tar cvfCj outfile.tar.bz2 topdir filename" is parsed the same as
+"tar filename -c -v -j -f outfile.tar.bz2 -C topdir". Note that "tar -cvfCj
+one two three" would equal "tar -c -v -f Cj one two three". (This matches
+historical usage.)</p>
+
+<p>Appending a space to the option in the option string ("a: b") makes it
+require a space, I.E. "-ab" is interpreted as "-a" "-b". That way "kill -stop"
+differs from "kill -s top".</p>
+
+<p>Appending ; to a longopt in the option string makes its argument optional,
+and only settable with =, so in ls "(color):;" can accept "ls --color" and
+"ls --color=auto" without complaining that the first has no argument.</p>
 
 <a name="lib_dirtree"><h3>lib/dirtree.c</h3>
 
@@ -955,24 +1311,31 @@ from elsewhere in the program. This gives ls -lR manual control
 of traversal order, which is neither depth first nor breadth first but
 instead a sort of FIFO order requried by the ls standard.</p>
 
-<a name="#toys">
-<h2>Directory toys/</h2>
+<a name="toys">
+<h1><a href="#toys">Directory toys/</a></h1>
 
 <p>This directory contains command implementations. Each command is a single
 self-contained file. Adding a new command involves adding a single
 file, and removing a command involves removing that file. Commands use
 shared infrastructure from the lib/ and generated/ directories.</p>
 
-<p>Currently there are three subdirectories under "toys/" containing commands
-described in POSIX-2008, the Linux Standard Base 4.1, or "other". The only
-difference this makes is which menu the command shows up in during "make
-menuconfig", the directories are otherwise identical. Note that they commands
-exist within a single namespace at runtime, so you can't have the same
-command in multiple subdirectories.</p>
+<p>Currently there are five subdirectories under "toys/" containing "posix"
+commands described in POSIX-2008, "lsb" commands described in the Linux
+Standard Base 4.1, "other" commands not described by either standard,
+"pending" commands awaiting cleanup (which default to "n" in menuconfig
+because they don't necessarily work right yet), and "example" code showing
+how toybox infrastructure works and providing template/skeleton files to
+start new commands.</p>
 
-<p>(There are actually four sub-menus in "make menuconfig", the fourth
-contains global configuration options for toybox, and lives in Config.in at
-the top level.)</p>
+<p>The only difference directory location makes is which menu the command
+shows up in during "make menuconfig", the directories are otherwise identical.
+Note that the commands exist within a single namespace at runtime, so you can't
+have the same command in multiple subdirectories. (The build tries to fail
+informatively when you do that.)</p>
+
+<p>There is one more sub-menus in "make menuconfig" containing global
+configuration options for toybox. This menu is defined in the top level
+Config.in.</p>
 
 <p>See <a href="#adding">adding a new command</a> for details on the
 layout of a command file.</p>
@@ -999,28 +1362,15 @@ Makefile.
 <p>Menuconfig infrastructure copied from the Linux kernel.  See the
 Linux kernel's Documentation/kbuild/kconfig-language.txt</p>
 
-<a name="generated">
-<h2>Directory generated/</h2>
+<!-- todo
 
-<p>All the files in this directory except the README are generated by the
-build.  (See scripts/make.sh)</p>
+Better OLDTOY and multiple command explanation. From Config.in:
 
-<ul>
-<li><p><b>config.h</b> - CFG_COMMAND and USE_COMMAND() macros set by menuconfig via .config.</p></li>
+<p>A command with multiple names (or multiple similar commands implemented in
+the same .c file) should have config symbols prefixed with the name of their
+C file. I.E. config symbol prefixes are NEWTOY() names. If OLDTOY() names
+have config symbols they must be options (symbols with an underscore and
+suffix) to the NEWTOY() name. (See generated/toylist.h)</p>
+-->
 
-<li><p><b>Config.in</b> - Kconfig entries for each command.  Included by top level Config.in.  The help text in here is used to generated help.h</p></li>
-
-<li><p><b>help.h</b> - Help text strings for use by "help" command.  Building
-this file requires python on the host system, so the prebuilt file is shipped
-in the build tarball to avoid requiring python to build toybox.</p></li>
-
-<li><p><b>newtoys.h</b> - List of NEWTOY() or OLDTOY() macros for all available
-commands.  Associates command_main() functions with command names, provides
-option string for command line parsing (<a href="#lib_args">see lib/args.c</a>),
-specifies where to install each command and whether toysh should fork before
-calling it.</p></li>
-</ul>
-
-<p>Everything in this directory is a derivative file produced from something
-else.  The entire directory is deleted by "make distclean".</p>
 <!--#include file="footer.html" -->

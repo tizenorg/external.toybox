@@ -1,19 +1,26 @@
 Summary: Single binary providing simplified versions of system commands
 Name: toybox
-Version: 0.4.4
+Version: 0.6.0
 Release: 1
 License: BSD
 Group: System/Shells
 Source: http://www.landley.net/toybox/downloads/%{name}-%{version}.tar.bz2
 Source1: toybox_tizen.config
+%if "%{?tizen_profile_name}"=="tv"
+Source2: bin_tv.links
+Source3: sbin_tv.links
+Source4: usrbin_tv.links
+%else
 Source2: bin.links
 Source3: sbin.links
 Source4: usrbin.links
+%endif
 Source5: usrsbin.links
 Source101: klogd.service
 Source102: syslogd.service
 Source1001: toybox.manifest
 Source1002: syslogd.manifest
+Source1003: klogd.manifest
 
 URL: http://www.landley.net/toybox/
 
@@ -39,21 +46,21 @@ Requires: %{name} = %{version}-%{release}
 %description symlinks-sysklogd
 ToyBox symlinks for utilities corresponding to 'sysklogd' package.
 
-%package symlinks-udhcpc
+%package symlinks-dhcp
 Group: tools
-Summary: ToyBox symlinks to provide 'udhcpc'
+Summary: ToyBox symlinks to provide 'dhcp'
 Requires: %{name} = %{version}-%{release}
 
-%description symlinks-udhcpc
-ToyBox symlinks for utilities corresponding to 'udhcpc' package.
+%description symlinks-dhcp
+ToyBox symlinks for utilities corresponding to 'dhcp' package.
 
-%package symlinks-udhcpd
+%package symlinks-dhcpd
 Group: tools
-Summary: ToyBox symlinks to provide 'udhcpd'
+Summary: ToyBox symlinks to provide 'dhcpd'
 Requires: %{name} = %{version}-%{release}
 
-%description symlinks-udhcpd
-ToyBox symlinks for utilities corresponding to 'udhcpd' package.
+%description symlinks-dhcpd
+ToyBox symlinks for utilities corresponding to 'dhcpd' package.
 
 %prep
 %setup -q
@@ -61,21 +68,23 @@ ToyBox symlinks for utilities corresponding to 'udhcpd' package.
 %build
 cp %{SOURCE1001} .
 cp %{SOURCE1002} .
+cp %{SOURCE1003} .
 # create dynamic toybox - the executable is toybox
 make defconfig
-cp packaging/toybox_tizen.config .config
+cp %{SOURCE1} .config
 # In case of user image, TIZEN_SECURE_MOUNT will be defined for secure mount.
 %if "%{?sec_build_project_name}" == "redwood8974_jpn_dcm"
 %if 0%{?tizen_build_binary_release_type_eng} != 1
 export CFLAGS+=" -DTIZEN_SECURE_MOUNT"
 %endif
 %endif
-make -j 4 CC="gcc $RPM_OPT_FLAGS"
+make -j 4 CC="gcc $RPM_OPT_FLAGS" CFLAGS="$CFLAGS -fPIE" LDOPTIMIZE="-Wl,--gc-sections -pie"
 cp toybox toybox-dynamic
 
 %install
 rm -rf $RPM_BUILD_ROOT
 mkdir -p $RPM_BUILD_ROOT/bin
+mkdir -p $RPM_BUILD_ROOT/sbin
 install -m 755 toybox-dynamic $RPM_BUILD_ROOT/bin/toybox
 
 # debian/toybox.links
@@ -99,21 +108,28 @@ install -m 644 %SOURCE102 %{buildroot}%{_libdir}/systemd/system/syslogd.service
 ln -s ../syslogd.service %{buildroot}%{_libdir}/systemd/system/basic.target.wants/syslogd.service
 rm -rf $RPM_BUILD_ROOT/sbin/syslogd
 cp -f $RPM_BUILD_ROOT/bin/toybox $RPM_BUILD_ROOT/sbin/syslogd
+rm -rf $RPM_BUILD_ROOT/sbin/klogd
+cp -f $RPM_BUILD_ROOT/bin/toybox $RPM_BUILD_ROOT/sbin/klogd
 
 mkdir -p $RPM_BUILD_ROOT%{_datadir}/license
 cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox
 cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-klogd
 cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-sysklogd
-cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpc
-cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpd
+cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-dhcp
+cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-dhcpd
 
 %files
 %defattr(-,root,root,-)
 %doc LICENSE
 %{_datadir}/license/toybox
 /bin/toybox
-/bin/mount
-/bin/umount
+%if "%{?tizen_profile_name}"=="tv"
+/sbin/ping
+/bin/ping
+/sbin/ping6
+/bin/ping6
+#/usr/bin/nslookup
+%endif
 %manifest toybox.manifest
 
 %files symlinks-klogd
@@ -122,7 +138,7 @@ cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpd
 /sbin/klogd
 %{_libdir}/systemd/system/klogd.service
 %{_libdir}/systemd/system/basic.target.wants/klogd.service
-%manifest toybox.manifest
+%manifest klogd.manifest
 
 %files symlinks-sysklogd
 %defattr(-,root,root,-)
@@ -132,15 +148,17 @@ cat LICENSE > $RPM_BUILD_ROOT%{_datadir}/license/toybox-symlinks-udhcpd
 %{_libdir}/systemd/system/basic.target.wants/syslogd.service
 %manifest syslogd.manifest
 
-%files symlinks-udhcpc
+%files symlinks-dhcp
 %defattr(-,root,root,-)
-%{_datadir}/license/toybox-symlinks-udhcpc
-%{_bindir}/udhcpc
+%{_datadir}/license/toybox-symlinks-dhcp
+%{_bindir}/dhcp
 %manifest toybox.manifest
 
-%files symlinks-udhcpd
+%files symlinks-dhcpd
 %defattr(-,root,root,-)
-%{_datadir}/license/toybox-symlinks-udhcpd
+%{_datadir}/license/toybox-symlinks-dhcpd
+%if "%{?tizen_profile_name}"!="tv"
 %{_bindir}/dumpleases
-%{_sbindir}/udhcpd
+%endif
+%{_sbindir}/dhcpd
 %manifest toybox.manifest

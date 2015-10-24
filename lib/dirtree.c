@@ -24,22 +24,21 @@ int dirtree_notdotdot(struct dirtree *catch)
 // (This doesn't open directory filehandles yet so as not to exhaust the
 // filehandle space on large trees, dirtree_handle_callback() does that.)
 
-struct dirtree *dirtree_add_node(struct dirtree *parent, char *name,
-  int symfollow)
+struct dirtree *dirtree_add_node(struct dirtree *parent, char *name, int flags)
 {
   struct dirtree *dt = NULL;
   struct stat st;
-  char buf[4096];
   int len = 0, linklen = 0;
 
   if (name) {
     // open code this because haven't got node to call dirtree_parentfd() on yet
     int fd = parent ? parent->data : AT_FDCWD;
 
-    if (fstatat(fd, name, &st, symfollow ? 0 : AT_SYMLINK_NOFOLLOW)) goto error;
-    if (S_ISLNK(st.st_mode) && symfollow) {
-      if (0>(linklen = readlinkat(fd, name, buf, 4095))) goto error;
-      buf[linklen++]=0;
+    if (fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW*!(flags&DIRTREE_SYMFOLLOW)))
+      goto error;
+    if (S_ISLNK(st.st_mode)) {
+      if (0>(linklen = readlinkat(fd, name, libbuf, 4095))) goto error;
+      libbuf[linklen++]=0;
     }
     len = strlen(name);
   }
@@ -50,7 +49,7 @@ struct dirtree *dirtree_add_node(struct dirtree *parent, char *name,
     strcpy(dt->name, name);
 
     if (linklen) {
-      dt->symlink = memcpy(len+(char *)dt, buf, linklen);
+      dt->symlink = memcpy(len+(char *)dt, libbuf, linklen);
       dt->data = --linklen;
     }
   }
@@ -58,9 +57,11 @@ struct dirtree *dirtree_add_node(struct dirtree *parent, char *name,
   return dt;
 
 error:
-  if (notdotdot(name)) {
+  if (!(flags&DIRTREE_SHUTUP) && notdotdot(name)) {
     char *path = parent ? dirtree_path(parent, 0) : "";
-    perror_msg("%s%s%s",path, parent ? "/" : "", name);
+
+    perror_msg("%s%s%s", path, parent ? "/" : "", name);
+    if (parent) free(path);
   }
   if (parent) parent->symlink = (char *)1;
   free(dt);
@@ -69,12 +70,16 @@ error:
 
 // Return path to this node, assembled recursively.
 
+// Initial call can pass in NULL to plen, or point to an int initialized to 0
+// to return the length of the path, or a value greater than 0 to allocate
+// extra space if you want to append your own text to the string.
+
 char *dirtree_path(struct dirtree *node, int *plen)
 {
   char *path;
   int len;
 
-  if (!node || !node->name) {
+  if (!node) {
     path = xmalloc(*plen);
     *plen = 0;
     return path;
@@ -105,17 +110,16 @@ int dirtree_parentfd(struct dirtree *node)
 struct dirtree *dirtree_handle_callback(struct dirtree *new,
           int (*callback)(struct dirtree *node))
 {
-  int flags, dir = S_ISDIR(new->st.st_mode);
+  int flags;
 
+  if (!new) return 0;
   if (!callback) callback = dirtree_notdotdot;
-
   flags = callback(new);
 
-  if (dir) {
+  if (S_ISDIR(new->st.st_mode)) {
     if (flags & (DIRTREE_RECURSE|DIRTREE_COMEAGAIN)) {
-      new->data = openat(dirtree_parentfd(new), new->name, 0);
-      dirtree_recurse(new, callback, flags & DIRTREE_SYMFOLLOW);
-      if (flags & DIRTREE_COMEAGAIN) flags = callback(new);
+      new->data = openat(dirtree_parentfd(new), new->name, O_CLOEXEC);
+      flags = dirtree_recurse(new, callback, flags);
     }
   }
 
@@ -131,20 +135,22 @@ struct dirtree *dirtree_handle_callback(struct dirtree *new,
 // Recursively read/process children of directory node (with dirfd in data),
 // filtering through callback().
 
-void dirtree_recurse(struct dirtree *node,
-          int (*callback)(struct dirtree *node), int symfollow)
+int dirtree_recurse(struct dirtree *node,
+          int (*callback)(struct dirtree *node), int flags)
 {
   struct dirtree *new, **ddt = &(node->child);
   struct dirent *entry;
   DIR *dir;
 
-  if (!(dir = fdopendir(node->data))) {
-    char *path = dirtree_path(node, 0);
-    perror_msg("No %s", path);
-    free(path);
+  if (node->data == -1 || !(dir = fdopendir(node->data))) {
+    if (!(flags & DIRTREE_SHUTUP)) {
+      char *path = dirtree_path(node, 0);
+      perror_msg("No %s", path);
+      free(path);
+    }
     close(node->data);
 
-    return;
+    return flags;
   }
 
   // according to the fddir() man page, the filehandle in the DIR * can still
@@ -152,8 +158,7 @@ void dirtree_recurse(struct dirtree *node,
 
   // The extra parentheses are to shut the stupid compiler up.
   while ((entry = readdir(dir))) {
-    if (!(new = dirtree_add_node(node, entry->d_name, symfollow)))
-      continue;
+    if (!(new = dirtree_add_node(node, entry->d_name, flags))) continue;
     new = dirtree_handle_callback(new, callback);
     if (new == DIRTREE_ABORTVAL) break;
     if (new) {
@@ -162,19 +167,31 @@ void dirtree_recurse(struct dirtree *node,
     }
   }
 
+  if (flags & DIRTREE_COMEAGAIN) {
+    node->again++;
+    flags = callback(node);
+  }
+
   // This closes filehandle as well, so note it
   closedir(dir);
   node->data = -1;
+
+  return flags;
+}
+
+// Create dirtree root
+struct dirtree *dirtree_start(char *name, int symfollow)
+{
+  return dirtree_add_node(0, name, DIRTREE_SYMFOLLOW*!!symfollow);
 }
 
 // Create dirtree from path, using callback to filter nodes.
 // If callback == NULL allocate a tree of struct dirtree nodes and return
 // pointer to root node.
-// symfollow is just for the top of tree, callback return code controls children
 
 struct dirtree *dirtree_read(char *path, int (*callback)(struct dirtree *node))
 {
-  struct dirtree *root = dirtree_add_node(0, path, 0);
+  struct dirtree *root = dirtree_start(path, 0);
 
   return root ? dirtree_handle_callback(root, callback) : DIRTREE_ABORTVAL;
 }

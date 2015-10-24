@@ -3,17 +3,6 @@
  * Copyright 2006 Rob Landley <rob@landley.net>
  */
 
-// Unfortunately, sizeof() doesn't work in a preprocessor test.  TODO.
-
-//#if sizeof(double) <= sizeof(long)
-//typedef double FLOAT;
-//#else
-typedef float FLOAT;
-//#endif
-
-// libc generally has this, but the headers are screwed up
-ssize_t getline(char **lineptr, size_t *n, FILE *stream);
-
 // llist.c
 
 // All these list types can be handled by the same code because first element
@@ -35,10 +24,14 @@ struct double_list {
   char *data;
 };
 
-void llist_traverse(void *list, void (*using)(void *data));
-void *llist_pop(void *list);  // actually void **list, but the compiler's dumb
+void llist_free_arg(void *node);
+void llist_free_double(void *node);
+void llist_traverse(void *list, void (*using)(void *node));
+void *llist_pop(void *list);  // actually void **list
+void *dlist_pop(void *list);  // actually struct double_list **list
 void dlist_add_nomalloc(struct double_list **list, struct double_list *new);
 struct double_list *dlist_add(struct double_list **list, char *data);
+void *dlist_terminate(void *list);
 
 // args.c
 void get_optflags(void);
@@ -57,6 +50,8 @@ void get_optflags(void);
 #define DIRTREE_COMEAGAIN    4
 // Follow symlinks to directories
 #define DIRTREE_SYMFOLLOW    8
+// Don't warn about failure to stat
+#define DIRTREE_SHUTUP      16
 // Don't look at any more files in this directory.
 #define DIRTREE_ABORT      256
 
@@ -67,80 +62,108 @@ struct dirtree {
   long extra; // place for user to store their stuff (can be pointer)
   struct stat st;
   char *symlink;
-  int data;  // dirfd for directory, linklen for symlink, -1 = comeagain
+  int data;  // dirfd for directory, linklen for symlink
+  char again;
   char name[];
 };
 
-struct dirtree *dirtree_add_node(struct dirtree *p, char *name, int symfollow);
+struct dirtree *dirtree_start(char *name, int symfollow);
+struct dirtree *dirtree_add_node(struct dirtree *p, char *name, int flags);
 char *dirtree_path(struct dirtree *node, int *plen);
 int dirtree_notdotdot(struct dirtree *catch);
 int dirtree_parentfd(struct dirtree *node);
 struct dirtree *dirtree_handle_callback(struct dirtree *new,
   int (*callback)(struct dirtree *node));
-void dirtree_recurse(struct dirtree *node,
-  int (*callback)(struct dirtree *node), int symfollow);
+int dirtree_recurse(struct dirtree *node, int (*callback)(struct dirtree *node),
+  int symfollow);
 struct dirtree *dirtree_read(char *path, int (*callback)(struct dirtree *node));
 
 // help.c
 
 void show_help(void);
 
-// lib.c
+// xwrap.c
 void xstrncpy(char *dest, char *src, size_t size);
+void xstrncat(char *dest, char *src, size_t size);
 void xexit(void) noreturn;
-void verror_msg(char *msg, int err, va_list va);
-void error_msg(char *msg, ...);
-void perror_msg(char *msg, ...);
-void error_exit(char *msg, ...) noreturn;
-void perror_exit(char *msg, ...) noreturn;
 void *xmalloc(size_t size);
 void *xzalloc(size_t size);
 void *xrealloc(void *ptr, size_t size);
 char *xstrndup(char *s, size_t n);
 char *xstrdup(char *s);
-char *xmsprintf(char *format, ...);
-void xprintf(char *format, ...);
+char *xmprintf(char *format, ...) printf_format;
+void xprintf(char *format, ...) printf_format;
 void xputs(char *s);
 void xputc(char c);
 void xflush(void);
 void xexec(char **argv);
+pid_t xpopen_both(char **argv, int *pipes);
+int xpclose_both(pid_t pid, int *pipes);
+pid_t xpopen(char **argv, int *pipe, int stdout);
+pid_t xpclose(pid_t pid, int pipe);
+int xrun(char **argv);
+int xpspawn(char **argv, int*pipes);
 void xaccess(char *path, int flags);
 void xunlink(char *path);
 int xcreate(char *path, int flags, int mode);
 int xopen(char *path, int flags);
 void xclose(int fd);
 int xdup(int fd);
+FILE *xfdopen(int fd, char *mode);
 FILE *xfopen(char *path, char *mode);
-ssize_t readall(int fd, void *buf, size_t len);
-ssize_t writeall(int fd, void *buf, size_t len);
 size_t xread(int fd, void *buf, size_t len);
 void xreadall(int fd, void *buf, size_t len);
 void xwrite(int fd, void *buf, size_t len);
 off_t xlseek(int fd, off_t offset, int whence);
-off_t lskip(int fd, off_t offset);
-char *readfile(char *name);
-char *xreadfile(char *name);
-void msleep(long miliseconds);
+char *xreadfile(char *name, char *buf, off_t len);
 int xioctl(int fd, int request, void *data);
-int64_t peek(void *ptr, int size);
-void poke(void *ptr, uint64_t val, int size);
 char *xgetcwd(void);
 void xstat(char *path, struct stat *st);
 char *xabspath(char *path, int exact);
-char *xrealpath(char *path);
 void xchdir(char *path);
-void xmkpath(char *path, int mode);
-void xsetuid(uid_t uid);
-struct string_list *find_in_path(char *path, char *filename);
-void utoa_to_buf(unsigned n, char *buf, unsigned buflen);
-void itoa_to_buf(int n, char *buf, unsigned buflen);
-char *utoa(unsigned n);
-char *itoa(int n);
-long atolx(char *c);
-int numlen(long l);
-int stridx(char *haystack, char needle);
-off_t fdlength(int fd);
+void xchroot(char *path);
+struct passwd *xgetpwuid(uid_t uid);
+struct group *xgetgrgid(gid_t gid);
+struct passwd *xgetpwnam(char *name);
+struct group *xgetgrnam(char *name);
+struct passwd *xgetpwnamid(char *user);
+struct group *xgetgrnamid(char *group);
+void xsetuser(struct passwd *pwd);
 char *xreadlink(char *name);
+long xparsetime(char *arg, long units, long *fraction);
+void xpidfile(char *name);
+void xregcomp(regex_t *preg, char *rexec, int cflags);
+char *xtzset(char *new);
+void xsignal(int signal, void *handler);
+
+// lib.c
+void verror_msg(char *msg, int err, va_list va);
+void error_msg(char *msg, ...) printf_format;
+void perror_msg(char *msg, ...) printf_format;
+void error_exit(char *msg, ...) printf_format noreturn;
+void perror_exit(char *msg, ...) printf_format noreturn;
+ssize_t readall(int fd, void *buf, size_t len);
+ssize_t writeall(int fd, void *buf, size_t len);
+off_t lskip(int fd, off_t offset);
+int mkpathat(int atfd, char *dir, mode_t lastmode, int flags);
+struct string_list **splitpath(char *path, struct string_list **list);
+char *readfileat(int dirfd, char *name, char *buf, off_t len);
+char *readfile(char *name, char *buf, off_t len);
+void msleep(long miliseconds);
+int64_t peek_le(void *ptr, unsigned size);
+int64_t peek_be(void *ptr, unsigned size);
+int64_t peek(void *ptr, unsigned size);
+void poke(void *ptr, uint64_t val, int size);
+struct string_list *find_in_path(char *path, char *filename);
+long estrtol(char *str, char **end, int base);
+long xstrtol(char *str, char **end, int base);
+long atolx(char *c);
+long atolx_range(char *numstr, long low, long high);
+int stridx(char *haystack, char needle);
+char *strlower(char *s);
+int unescape(char c);
+int strstart(char **a, char *b);
+off_t fdlength(int fd);
 void loopfiles_rw(char **argv, int flags, int permissions, int failok,
   void (*function)(int fd, char *name));
 void loopfiles(char **argv, void (*function)(int fd, char *name));
@@ -152,71 +175,73 @@ int copy_tempfile(int fdin, char *name, char **tempname);
 void delete_tempfile(int fdin, int fdout, char **tempname);
 void replace_tempfile(int fdin, int fdout, char **tempname);
 void crc_init(unsigned int *crc_table, int little_endian);
-void terminal_size(unsigned *x, unsigned *y);
+void base64_init(char *p);
 int yesno(char *prompt, int def);
-void for_each_pid_with_name_in(char **names, int (*callback)(pid_t pid, char *name));
-unsigned long xstrtoul(const char *nptr, char **endptr, int base);
+#define HR_SPACE 1
+#define HR_B 2
+int human_readable(char *buf, unsigned long long num, int style);
+int qstrcmp(const void *a, const void *b);
+int xpoll(struct pollfd *fds, int nfds, int timeout);
+
+// interestingtimes.c
+int xgettty(void);
+int terminal_size(unsigned *xx, unsigned *yy);
+int set_terminal(int fd, int raw, struct termios *old);
+int scan_key(char *scratch, int block);
+void tty_esc(char *s);
+void tty_jump(int x, int y);
+void tty_reset(void);
+void tty_sigreset(int i);
+
+// Results from scan_key()
+#define KEY_UP 256
+#define KEY_DOWN 257
+#define KEY_RIGHT 258
+#define KEY_LEFT 259
+#define KEY_PGUP 260
+#define KEY_PGDN 261
+#define KEY_HOME 262
+#define KEY_END  263
+#define KEY_INSERT 264
 
 // net.c
 int xsocket(int domain, int type, int protocol);
+void xsetsockopt(int fd, int level, int opt, void *val, socklen_t len);
+int xconnect(char *host, char *port, int family, int socktype, int protocol,
+  int flags);
+
+// password.c
+int get_salt(char *salt, char * algo);
 
 // getmountlist.c
 struct mtab_list {
-  struct mtab_list *next;
+  struct mtab_list *next, *prev;
   struct stat stat;
   struct statvfs statvfs;
   char *dir;
   char *device;
+  char *opts;
   char type[0];
 };
 
-struct mtab_list *xgetmountlist(void);
-
-void bunzipStream(int src_fd, int dst_fd);
+void comma_collate(char **old, char *new);
+char *comma_iterate(char **list, int *len);
+int comma_scan(char *optlist, char *opt, int clean);
+int comma_scanall(char *optlist, char *scanlist);
+int mountlist_istype(struct mtab_list  *ml, char *typelist);
+struct mtab_list *xgetmountlist(char *path);
 
 // signal
 
+void generic_signal(int signal);
 void sigatexit(void *handler);
 int sig_to_num(char *pidstr);
 char *num_to_sig(int sig);
 
 mode_t string_to_mode(char *mode_str, mode_t base);
 void mode_to_string(mode_t mode, char *buf);
-int m_parse(char *optstr, mode_t *mode);
+char *basename_r(char *name);
+void names_to_pid(char **names, int (*callback)(pid_t pid, char *name));
 
-// password helper functions
-#define MAX_SALT_LEN  20 //3 for id, 16 for key, 1 for '\0'
-#define SYS_FIRST_ID  100
-#define SYS_LAST_ID   999
-int get_salt(char *salt, char * algo);
-int read_password(char * buff, int buflen, char* mesg);
-int update_password(char *filename, char* username, char* encrypted);
-int update_group(struct group *grp, char *filename);
-void is_valid_username(const char *name);
-int add_user( char *filename, char *entry);
-char* get_shell(void);
-
-// du helper functions
-char* make_human_readable(unsigned long long size, unsigned long unit);
-
-// useful tools
-#define min(a,b) (a)<(b) ? (a) : (b)
-#define max(a,b) (a)>(b) ? (a) : (b)
-
-// cut helper functions
-unsigned long get_int_value(const char *numstr, unsigned lowrange, unsigned highrange);
-
-/*
- * Defination for daemonizing
- */
-
-#define CHDIR_ROOT     1
-#define DEVNULL_STDIO  2
-#define ONLY_SIMULATE  3
-#define CLOSE_FDS      4
-int go_daemon(int flags);
-
-/*loop device helper functions */
-int get_loopdevice(char *loopdev);
-int set_loopdevice(char* loopdev, char *file, off_t offset);
-int delete_loopdevice(char *loopdev);
+// Functions in need of further review/cleanup
+#include "lib/pending.h"

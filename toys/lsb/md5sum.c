@@ -8,8 +8,8 @@
  * They're combined this way to share infrastructure, and because md5sum is
  * and LSB standard command, sha1sum is just a good idea.
 
-USE_MD5SUM(NEWTOY(md5sum, NULL, TOYFLAG_USR|TOYFLAG_BIN))
-USE_MD5SUM_SHA1SUM(OLDTOY(sha1sum, md5sum, NULL, TOYFLAG_USR|TOYFLAG_BIN))
+USE_MD5SUM(NEWTOY(md5sum, "b", TOYFLAG_USR|TOYFLAG_BIN))
+USE_SHA1SUM(NEWTOY(sha1sum, "b", TOYFLAG_USR|TOYFLAG_BIN))
 
 config MD5SUM
   bool "md5sum"
@@ -21,16 +21,19 @@ config MD5SUM
     Output one hash (16 hex digits) for each input file, followed by
     filename.
 
-config MD5SUM_SHA1SUM
+    -b	brief (hash only, no filename)
+
+config SHA1SUM
   bool "sha1sum"
   default y
-  depends on MD5SUM
   help
     usage: sha1sum [FILE]...
 
-    calculate sha1 hash for each input file, reading from stdin if one.
+    calculate sha1 hash for each input file, reading from stdin if none.
     Output one hash (20 hex digits) for each input file, followed by
     filename.
+
+    -b	brief (hash only, no filename)
 */
 
 #define FOR_md5sum
@@ -45,6 +48,8 @@ GLOBALS(
     unsigned i[16];
   } buffer;
 )
+
+#define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 
 // for(i=0; i<64; i++) md5table[i] = abs(sin(i+1))*(1<<32);  But calculating
 // that involves not just floating point but pulling in -lm (and arguing with
@@ -64,44 +69,45 @@ static uint32_t md5table[64] = {
   0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
 };
 
+static const uint8_t md5rot[64] = {
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+  5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21
+};
+
 // Mix next 64 bytes of data into md5 hash
 
 static void md5_transform(void)
 {
-  unsigned x[4], *b = (unsigned *)TT.buffer.c;
+  unsigned x[4], *b = TT.buffer.i;
   int i;
 
   memcpy(x, TT.state, sizeof(x));
 
   for (i=0; i<64; i++) {
-    unsigned int in, a, rot, temp;
-
-    a = (-i)&3;
+    unsigned int in, temp, swap;
     if (i<16) {
       in = i;
-      rot = 7+(5*(i&3));
-      temp = x[(a+1)&3];
-      temp = (temp & x[(a+2)&3]) | ((~temp) & x[(a+3)&3]);
+      temp = x[1];
+      temp = (temp & x[2]) | ((~temp) & x[3]);
     } else if (i<32) {
       in = (1+(5*i))&15;
-      temp = (i&3)+1;
-      rot = temp*5;
-      if (temp&2) rot--;
-      temp = x[(a+3)&3];
-      temp = (x[(a+1)&3] & temp) | (x[(a+2)&3] & ~temp);
+      temp = x[3];
+      temp = (x[1] & temp) | (x[2] & ~temp);
     } else if (i<48) {
-      in = (5+(3*(i&15)))&15;
-      rot = i&3;
-      rot = 4+(5*rot)+((rot+1)&6);
-      temp = x[(a+1)&3] ^ x[(a+2)&3] ^ x[(a+3)&3];
+      in = (3*i+5)&15;
+      temp = x[1] ^ x[2] ^ x[3];
     } else {
-      in = (7*(i&15))&15;
-      rot = (i&3)+1;
-      rot = (5*rot)+(((rot+2)&2)>>1);
-      temp = x[(a+2)&3] ^ (x[(a+1)&3] | ~x[(a+3)&3]);
+      in = (7*i)&15;
+      temp = x[2] ^ (x[1] | ~x[3]);
     }
-    temp += x[a] + b[in] + md5table[i];
-    x[a] = x[(a+1)&3] + ((temp<<rot) | (temp>>(32-rot)));
+    temp += x[0] + b[in] + md5table[i];
+    swap = x[3];
+    x[3] = x[2];
+    x[2] = x[1];
+    x[1] += rol(temp, md5rot[i]);
+    x[0] = swap;
   }
   for (i=0; i<4; i++) TT.state[i] += x[i];
 }
@@ -109,7 +115,6 @@ static void md5_transform(void)
 // Mix next 64 bytes of data into sha1 hash.
 
 static const unsigned rconsts[]={0x5A827999,0x6ED9EBA1,0x8F1BBCDC,0xCA62C1D6};
-#define rol(value, bits) (((value) << (bits)) | ((value) >> (32 - (bits))))
 
 static void sha1_transform(void)
 {
@@ -163,19 +168,21 @@ static void hash_update(char *data, unsigned int len, void (*transform)(void))
   j = TT.count & 63;
   TT.count += len;
 
-  // Enough data to process a frame?
-  if ((j + len) > 63) {
-    i = 64-j;
-    memcpy(TT.buffer.c + j, data, i);
+  for (;;) {
+    // Grab next chunk of data, return if it's not enough to process a frame
+    i = 64 - j;
+    if (i>len) i = len;
+    memcpy(TT.buffer.c+j, data, i);
+    if (j+i != 64) break;
+
+    // Process a frame
+    if (IS_BIG_ENDIAN)
+      for (j=0; j<16; j++) TT.buffer.i[j] = SWAP_LE32(TT.buffer.i[j]);
     transform();
-    for ( ; i + 63 < len; i += 64) {
-      memcpy(TT.buffer.c, data + i, 64);
-      transform();
-    }
-    j = 0;
-  } else i = 0;
-  // Grab remaining chunk
-  memcpy(TT.buffer.c + j, data + i, len - i);
+    j=0;
+    data += i;
+    len -= i;
+  }
 }
 
 // Callback for loopfiles()
@@ -216,22 +223,26 @@ static void do_hash(int fd, char *name)
     hash_update(&buf, 1, transform);
     buf = 0;
   } while ((TT.count & 63) != 56);
-  if (sha1) count=bswap_64(count);
-  for (i = 0; i < 8; i++) TT.buffer.c[56+i] = count >> (8*i);
-  transform();
+  count = sha1 ? SWAP_BE64(count) : SWAP_LE64(count);
+  hash_update((void *)&count, 8, transform);
 
   if (sha1)
     for (i = 0; i < 20; i++)
       printf("%02x", 255&(TT.state[i>>2] >> ((3-(i & 3)) * 8)));
-  else for (i=0; i<4; i++) printf("%08x", SWAP_BE32(TT.state[i]));
+  else for (i=0; i<4; i++) printf("%08x", bswap_32(TT.state[i]));
 
-  // Wipe variables.  Cryptographer paranoia.
+  // Wipe variables. Cryptographer paranoia.
   memset(&TT, 0, sizeof(TT));
 
-  printf("  %s\n", name);
+  printf((toys.optflags & FLAG_b) ? "\n" : "  %s\n", name);
 }
 
 void md5sum_main(void)
 {
   loopfiles(toys.optargs, do_hash);
+}
+
+void sha1sum_main(void)
+{
+  md5sum_main();
 }

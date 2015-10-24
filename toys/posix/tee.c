@@ -4,7 +4,7 @@
  *
  * See http://opengroup.org/onlinepubs/9699919799/utilities/tee.html
 
-USE_TEE(NEWTOY(tee, "ia", TOYFLAG_BIN))
+USE_TEE(NEWTOY(tee, "ia", TOYFLAG_USR|TOYFLAG_BIN))
 
 config TEE
   bool "tee"
@@ -45,7 +45,7 @@ static void do_tee_open(int fd, char *name)
 
 void tee_main(void)
 {
-  if (toys.optflags & FLAG_i) signal(SIGINT, SIG_IGN);
+  if (toys.optflags & FLAG_i) xsignal(SIGINT, SIG_IGN);
 
   // Open output files
   loopfiles_rw(toys.optargs,

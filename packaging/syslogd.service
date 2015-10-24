@@ -8,9 +8,10 @@ ConditionKernelCommandLine=|!sec_debug.enable_user=0
 [Service]
 Type=forking
 ExecStart=/sbin/syslogd -b 5 -B 99
-OOMScoreAdjust=-1000
+OOMScoreAdjust=-900
 Restart=always
 RestartSec=0
+SmackProcessLabel=syslogd
 
 [Install]
 WantedBy=basic.target

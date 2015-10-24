@@ -93,7 +93,6 @@ static void finish_oldfile(void)
 static void fail_hunk(void)
 {
   if (!TT.current_hunk) return;
-  TT.current_hunk->prev->next = 0;
 
   fprintf(stderr, "Hunk %d FAILED %ld/%ld.\n",
       TT.hunknum, TT.oldline, TT.newline);
@@ -137,9 +136,7 @@ static int apply_one_hunk(void)
   int (*lcmp)(char *aa, char *bb);
 
   lcmp = (toys.optflags & FLAG_l) ? (void *)loosecmp : (void *)strcmp;
-
-  // Break doubly linked list so we can use singly linked traversal function.
-  TT.current_hunk->prev->next = NULL;
+  dlist_terminate(TT.current_hunk);
 
   // Match EOF if there aren't as many ending context lines as beginning
   for (plist = TT.current_hunk; plist; plist = plist->next) {
@@ -201,21 +198,24 @@ static int apply_one_hunk(void)
         // Match failed.  Write out first line of buffered data and
         // recheck remaining buffered data for a new match.
 
-        if (PATCH_DEBUG) fprintf(stderr, "NOT: %s\n", plist->data);
+        if (PATCH_DEBUG) {
+          int bug = 0;
+
+          if (!plist) fprintf(stderr, "NULL plist\n");
+          else {
+            while (plist->data[bug] == check->data[bug]) bug++;
+            fprintf(stderr, "NOT(%d:%d!=%d): %s\n", bug, plist->data[bug],
+              check->data[bug], plist->data);
+          }
+        }
 
         TT.state = 3;
-        check = llist_pop(&buf);
-        check->prev->next = buf;
-        buf->prev = check->prev;
-        do_line(check);
+        do_line(check = dlist_pop(&buf));
         plist = TT.current_hunk;
 
         // If we've reached the end of the buffer without confirming a
         // match, read more lines.
-        if (check==buf) {
-          buf = 0;
-          break;
-        }
+        if (!buf) break;
         check = buf;
       } else {
         if (PATCH_DEBUG) fprintf(stderr, "MAYBE: %s\n", plist->data);
@@ -235,7 +235,7 @@ out:
   TT.state = 1;
 done:
   if (buf) {
-    buf->prev->next = NULL;
+    dlist_terminate(buf);
     llist_traverse(buf, do_line);
   }
 
@@ -298,6 +298,7 @@ void patch_main(void)
         if (!TT.oldlen && !TT.newlen) state = apply_one_hunk();
         continue;
       }
+      dlist_terminate(TT.current_hunk);
       fail_hunk();
       state = 0;
       continue;
@@ -385,12 +386,8 @@ void patch_main(void)
           if ((!strcmp(oldname, "/dev/null") || !oldsum) && access(name, F_OK))
           {
             printf("creating %s\n", name);
-            s = strrchr(name, '/');
-            if (s) {
-              *s = 0;
-              xmkpath(name, -1);
-              *s = '/';
-            }
+            if (mkpathat(AT_FDCWD, name, 0, 2))
+              perror_exit("mkpath %s", name);
             TT.filein = xcreate(name, O_CREAT|O_EXCL|O_RDWR, 0666);
           } else {
             printf("patching %s\n", name);

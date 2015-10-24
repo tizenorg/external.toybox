@@ -3,8 +3,6 @@
  * Copyright 2006 Rob Landley <rob@landley.net>
  */
 
-#include <linux/fs.h>
-
 // Stuff defined in linux/ext2_fs.h
 
 #define EXT2_SUPER_MAGIC  0xEF53
@@ -142,40 +140,3 @@ enum {
   EXT2_FT_SYMLINK,
   EXT2_FT_MAX
 };
-
-
-/*
- * Inode flags
- */
-#define EXT2_SECRM_FL			    0x00000001 /* Secure deletion */
-#define EXT2_UNRM_FL			    0x00000002 /* Undelete */
-#define EXT2_COMPR_FL			    0x00000004 /* Compress file */
-#define EXT2_SYNC_FL			    0x00000008 /* Synchronous updates */
-#define EXT2_IMMUTABLE_FL		  0x00000010 /* Immutable file */
-#define EXT2_APPEND_FL			  0x00000020 /* writes to file may only append */
-#define EXT2_NODUMP_FL			  0x00000040 /* do not dump file */
-#define EXT2_NOATIME_FL			  0x00000080 /* do not update atime */
-#define EXT2_INDEX_FL			    0x00001000 /* hash-indexed directory */
-#define EXT3_JOURNAL_DATA_FL	0x00004000 /* file data should be journaled */
-#define EXT2_NOTAIL_FL			  0x00008000 /* file tail should not be merged */
-#define EXT2_DIRSYNC_FL			  0x00010000 /* Synchronous directory modifications */
-#define EXT2_TOPDIR_FL			  0x00020000 /* Top of directory hierarchies*/
-
-/*
- * ioctl commands
- */
-#define	EXT2_IOC_GETFLAGS		FS_IOC_GETFLAGS
-#define	EXT2_IOC_GETVERSION	FS_IOC_GETVERSION
-#define EXT2_IOC_SETVERSION	FS_IOC_SETVERSION
-#define EXT2_IOC_SETFLAGS		FS_IOC_SETFLAGS
-
-typedef struct _ext2_attrs {
-	char *name;
-	unsigned long inode_flag;
-	char optchar;
-}EXT2_ATTRS;
-
-int get_e2fs_flag(const int fd, struct stat *sb, unsigned long *flagval);
-int set_e2fs_flag(const int fd, struct stat *sb, unsigned long flagval);
-int get_e2fs_version(const int fd, unsigned long *version);
-int set_e2fs_version(const int fd, unsigned long version);

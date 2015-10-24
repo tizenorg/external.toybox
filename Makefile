@@ -3,14 +3,19 @@
 
 all: toybox
 
-toybox toybox_unstripped: .config *.[ch] lib/*.[ch] toys/*.h toys/*/*.c scripts/*.sh
+KCONFIG_CONFIG ?= .config
+
+toybox_stuff: $(KCONFIG_CONFIG) *.[ch] lib/*.[ch] toys/*.h toys/*/*.c scripts/*.sh
+
+toybox toybox_unstripped: toybox_stuff
 	scripts/make.sh
 
 .PHONY: clean distclean baseline bloatcheck install install_flat \
-	uinstall uninstall_flat test tests help scripts/test
+	uinstall uninstall_flat test tests help toybox_stuff change
 
 include kconfig/Makefile
 
+$(KCONFIG_CONFIG): $(KCONFIG_TOP)
 $(KCONFIG_TOP): generated/Config.in
 generated/Config.in: toys/*/*.c scripts/genconfig.sh
 	scripts/genconfig.sh
@@ -24,28 +29,30 @@ baseline: toybox_unstripped
 bloatcheck: toybox_old toybox_unstripped
 	@scripts/bloatcheck toybox_old toybox_unstripped
 
-instlist: toybox
-	$(HOSTCC) -I . scripts/install.c -o instlist
+generated/instlist: toybox_stuff
+	NOBUILD=1 scripts/make.sh
+	$(HOSTCC) -I . scripts/install.c -o generated/instlist
 
-install_flat: instlist
+install_flat: generated/instlist
 	scripts/install.sh --symlink --force
 
 install:
 	scripts/install.sh --long --symlink --force
 
-uninstall_flat: instlist
+uninstall_flat: generated/instlist
 	scripts/install.sh --uninstall
 
 uninstall:
 	scripts/install.sh --long --uninstall
 
+change:
+	scripts/change.sh
+
 clean::
-	rm -rf toybox toybox_unstripped generated/config.h generated/Config.in \
-		generated/newtoys.h generated/globals.h instlist testdir \
-		generated/Config.probed
+	rm -rf toybox toybox_unstripped generated change .singleconfig*
 
 distclean: clean
-	rm -f toybox_old .config* generated/help.h
+	rm -f toybox_old .config*
 
 test: tests
 
@@ -54,7 +61,8 @@ tests:
 
 help::
 	@echo  '  toybox          - Build toybox.'
-	@echo  '  baseline        - Create busybox_old for use by bloatcheck.'
+	@echo  '  change          - Build each command standalone under change/.'
+	@echo  '  baseline        - Create toybox_old for use by bloatcheck.'
 	@echo  '  bloatcheck      - Report size differences between old and current versions'
 	@echo  '  test            - Run test suite against compiled commands.'
 	@echo  '  clean           - Delete temporary files.'
